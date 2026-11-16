@@ -1,0 +1,16 @@
+build/
+sdkconfig
+sdkconfig.old
+__pycache__/
+*.pyc
+.pytest_cache/
+/files/
+/release/
+/backups/
+/backup/
+tools/installer/files/
+*.gb
+*.gbc
+*.gg
+*.sms
+*.sav

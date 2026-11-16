@@ -1,0 +1,13 @@
+cf_fetch_test
+cf_sim
+*.dSYM
+cf_install_test
+cf_ctr_test
+cf_wire_check
+cf_ota_test
+cf_pack_test
+cf_lib_test
+cf_sgz_test
+cf_sgz_test_unit
+cf_rc_win_test
+cf_install_test

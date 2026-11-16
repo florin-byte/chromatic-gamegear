@@ -1,0 +1,3 @@
+# usb-cart firmware (lane cartflash1): release defaults + the cart feature, USB route only (no Wi-Fi install)
+CONFIG_NW_CARTFLASH=y
+# CONFIG_NW_CARTFLASH_WIFI is not set

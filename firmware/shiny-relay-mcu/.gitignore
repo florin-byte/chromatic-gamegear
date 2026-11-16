@@ -1,0 +1,7 @@
+managed_components/
+build/
+sdkconfig
+.cache/
+.trash/
+build_debug/
+release_images/

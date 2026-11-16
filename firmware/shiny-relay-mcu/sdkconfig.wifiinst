@@ -1,0 +1,21 @@
+# wifiinst1: the Wi-Fi cart install ("Send to my Chromatic") on top of the usb-cart firmware.
+# Use AFTER sdkconfig.usbcart: SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.usbcart;sdkconfig.wifiinst"
+CONFIG_NW_CARTFLASH_WIFI=y
+CONFIG_APP_PROJECT_VER="1.1.5-fr3o"
+
+# cartspeed2: the FPGA link UART keeps receiving while the flash chip is busy (staging writes beside the
+# express cart stream: its status packets were lost for 15 s at a time with the ISR in flash)
+CONFIG_UART_ISR_IN_IRAM=y
+
+# cartspeed2: TIME_WAIT 6 s (2 x MSL), not 120 s: every connection an install closes (the blob GET, the device calls)
+# left a TCP control block in the middle of the heap for two minutes, and the next TLS handshake (16 KiB record
+# buffer) found no block big enough (unit 1: up to 11 in TIME_WAIT, largest free block 13 KiB)
+CONFIG_LWIP_TCP_MSL=3000
+
+# 1.1.0 (owner 2026-10-20): the update over Wi-Fi. Two app slots (partitions_ota.csv) and the boot loader's
+# rollback: a new app that does not confirm itself (cf_ota.c) is left for the old one at the next boot.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_ota.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# the boot loader without its build time: every 1.1.x build makes the same boot loader, so an image set's
+# boot loader (pinned per release) and the one a unit runs hash the same (/link_device/fw/check "bl")
+CONFIG_BOOTLOADER_COMPILE_TIME_DATE=n

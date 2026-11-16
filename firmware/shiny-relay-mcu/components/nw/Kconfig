@@ -1,0 +1,42 @@
+menu "Shiny Relay network window"
+
+config NW_CARTFLASH
+    bool "Cart flash (\"Send to my Chromatic\", lane cartflash1, DRAFT)"
+    default n
+    help
+        Ops 0x20-0x21 (CF_LOAD / CF_NEXT) for the WRAM cart writer, the cart job engine
+        (components/nw/cartflash/cf_esp.c) and the `cart` console command: the streamed
+        Wi-Fi install and the USB backup / restore (`cart usb`, protocol CBU1). Works with
+        the STOCK partition table (nothing is stored on the ESP32); only the old bench
+        jobs (backup / install / restore / fetch) want the "cart" partition. Needs an FPGA
+        image with the netboot stub, the boot image select and the cart bus engine.
+        Off by default; never enable for a release without the owner's go.
+
+config NW_CARTFLASH_WIFI
+    bool "Cart flash: the Wi-Fi install (\"Send to my Chromatic\")"
+    depends on NW_CARTFLASH
+    default n
+    help
+        Off: only the USB route (`cart usb`, protocol CBU1) is in the build: no poll of the
+        server, no question on SYSTEM > NETWORK, no download. That is the usb-cart firmware.
+
+config NW_OTA_TEST_NO_CONFIRM
+    bool "TEST ONLY: an update that never confirms itself (proves the boot loader's rollback)"
+    depends on NW_CARTFLASH_WIFI
+    default n
+    help
+        1.1.0: the app never marks itself valid after an update and restarts itself 40 s after
+        the boot, as a crashing build would: the boot loader must then start the old slot. Never
+        in a release image.
+
+config NW_CARTFLASH_GBT
+    bool "Cart flash: the GB-timed route (no engine in the FPGA; UNTESTED program / erase)"
+    depends on NW_CARTFLASH
+    default n
+    help
+        The cart install writes with plain CPU cycles (writer v4 F_GBT, commands at
+        1AAA/1555) instead of the FPGA cart bus engine. Proven on a ModRetro cart for RAM
+        reads and the flash ID only (2026-10-11); program / erase are not. Default: the
+        engine route.
+
+endmenu

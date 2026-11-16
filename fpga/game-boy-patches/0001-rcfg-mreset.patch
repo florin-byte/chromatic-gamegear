@@ -1,0 +1,91 @@
+--- a/esp32t/src/top.v
++++ b/esp32t/src/top.v
+@@ -504,7 +504,7 @@
+     assign QSPI_MISO = q_out_en ? q_out[1] : 1'bz;
+     assign QSPI_WP   = q_out_en ? q_out[2] : 1'bz;
+     assign QSPI_HD   = q_out_en ? q_out[3] : 1'bz;
+-    wire        rc_on, rc_hold, rc_stall, rc_rd, rc_wr, rc_busy, rc_dirty, rc_dirty_clr, rc_inval_tog;
++    wire        rc_on, rc_hold, rc_stall, rc_rd, rc_wr, rc_busy, rc_dirty, rc_dirty_clr, rc_inval_tog, rc_mreset_tog;
+     wire  [7:0] rc_q, rc_di, rc_rom_mask;
+     wire [15:0] rc_a;
+     wire  [2:0] rc_mbc;
+@@ -1188,6 +1188,7 @@
+         .r_ram_has      (rc_ram_has),
+         .r_rtc_has      (rc_rtc_has),
+         .r_inval_tog    (rc_inval_tog),
++        .r_mreset_tog   (rc_mreset_tog),
+         .r_dirty_clr    (rc_dirty_clr),
+         .r_dirty        (rc_dirty),
+         .r_busy         (rc_busy),
+@@ -1223,6 +1224,7 @@
+         .h_ram_has        (rc_ram_has),
+         .h_rtc_has        (rc_rtc_has),
+         .h_inval_tog      (rc_inval_tog),
++        .h_mreset_tog     (rc_mreset_tog),
+         .h_busy           (rc_busy),
+         .a                (rc_a),
+         .rd               (rc_rd),
+--- a/esp32t/src/rtl/BSP/cart_xs.v
++++ b/esp32t/src/rtl/BSP/cart_xs.v
+@@ -51,7 +51,7 @@
+ //  24 FCDST  F = the PSRAM byte address FCOPY writes to next (even, 0x040000 and up: not the frame buffers)
+ //   18.31 guards (parameters): FERASE / FPROG at FLASH_W_BASE (0x05C000) and up, FHDR below FLASH_H_TOP (0x7C0).
+ //  32 RCFG   F = {ram_mask[19:16], rom_mask[15:8], b4 rtc, b3 ram, b2:0 mbc}, arg: b0 RAM cart on,
+-//            b1 hold the GB core in reset, b2 drop the cache, b3 clear the save RAM dirty flag
++//            b1 hold the GB core in reset, b2 drop the cache, b3 clear the save RAM dirty flag, b4 MRESET (mapper reset)
+ //  33 RREAD  F = PSRAM byte address (even), n = 2..1024 (even, one 1 KiB row): into the read window
+ //            (QSPI read, qspi_slave.v)
+ //  34 RRTC   arg 0: the clock {DH,DL,H,M,S} -> crc field = bytes DL H M S... (crc[31:0] = rtc[31:0],
+@@ -148,6 +148,7 @@
+     output reg               r_ram_has = 1'b0,
+     output reg               r_rtc_has = 1'b0,
+     output reg               r_inval_tog = 1'b0,
++    output reg               r_mreset_tog = 1'b0,
+     output reg               r_dirty_clr = 1'b0,
+     input                    r_dirty,
+     input                    r_busy,
+@@ -644,6 +645,7 @@
+                         r_on <= qarg[q_head[QD_AW-1:0]][0]; r_hold <= qarg[q_head[QD_AW-1:0]][1];
+                         if (qarg[q_head[QD_AW-1:0]][2]) r_inval_tog <= ~r_inval_tog;
+                         if (qarg[q_head[QD_AW-1:0]][3]) r_dirty_clr <= 1'b1;
++                        if (qarg[q_head[QD_AW-1:0]][4]) r_mreset_tog <= ~r_mreset_tog;
+                         done_seq <= qseq[q_head[QD_AW-1:0]];
+                     end
+                     8'd33: begin                                                                    // RREAD
+--- a/esp32t/src/rtl/EMU/ramcart.v
++++ b/esp32t/src/rtl/EMU/ramcart.v
+@@ -32,6 +32,7 @@
+     input              h_ram_has,
+     input              h_rtc_has,
+     input              h_inval_tog,        // a toggle: drop every cached line (after a new load)
++    input              h_mreset_tog,       // a toggle: reset the mapper without changing h_on
+     output             h_busy,             // an invalidate / request is still running
+     // ---------------- the core's cart bus (hclk) ----------------
+     input      [15:0]  a,
+@@ -150,6 +151,7 @@
+     wire       h_done_edge = (h_done_sync[2] != h_done_seen);
+     reg  [2:0] h_inval_sync = 3'b000, h_wread_sync = 3'b000;
+     reg        h_inval_seen = 1'b0, h_wread_seen = 1'b0, h_init = 1'b0;
++    reg  [2:0] h_mreset_sync = 3'b000;
+     reg        inval_pend = 1'b0, wread_pend = 1'b0, wread_run = 1'b0, fill_run = 1'b0;
+     assign h_busy = inval_pend | h_req_busy | wread_pend;
+     assign h_cw_ready = !h_on && !h_req_busy && ws == W_IDLE && !inval_pend && !wread_pend;
+@@ -174,6 +176,7 @@
+         h_done_sync  <= {h_done_sync[1:0], x_done_tog};
+         h_inval_sync <= {h_inval_sync[1:0], h_inval_tog};
+         h_wread_sync <= {h_wread_sync[1:0], h_wread_tog};
++        h_mreset_sync <= {h_mreset_sync[1:0], h_mreset_tog};
+         d_we <= 1'b0;
+         if (h_dirty_clr) h_dirty <= 1'b0;
+ 
+@@ -300,8 +303,8 @@
+                     req(K_WRITE, {h_cw_addr[22:1], 1'b0}, 11'd2, h_cw_data);
+             end
+ 
+-            // leaving RAM cart mode: the mapper back to power-on
+-            if (!h_on) begin
++            // leaving RAM cart mode or MRESET: the mapper back to power-on; the live RTC keeps ticking
++            if (!h_on || h_mreset_sync[2] != h_mreset_sync[1]) begin
+                 ram_en <= 1'b0; rom_bank <= 9'd1; mbc1_hi <= 2'd0; mbc1_mode <= 1'b0; ram_bank <= 4'd0;
+                 rtc_sel <= 1'b0; ws <= W_IDLE;
+             end

@@ -1,0 +1,959 @@
+--- a/esp32t/src/top.v
++++ b/esp32t/src/top.v
+@@ -507,6 +507,8 @@
+     wire        rc_on, rc_hold, rc_stall, rc_rd, rc_wr, rc_busy, rc_dirty, rc_dirty_clr, rc_inval_tog, rc_mreset_tog;
+     wire  [7:0] rc_q, rc_di, rc_rom_mask;
+     wire [15:0] rc_a;
++    wire rc_lin;
++    wire [21:0] rc_lin_a;
+     wire  [2:0] rc_mbc;
+     wire  [3:0] rc_ram_mask;
+     wire        rc_ram_has, rc_rtc_has, rc_wread_tog, rc_wread_done_tog, rc_rtc_set;
+@@ -822,6 +824,8 @@
+         .rc_q               (rc_q),
+         .rc_stall           (rc_stall),
+         .rc_a               (rc_a),
++        .rc_lin             (rc_lin),
++        .rc_lin_a           (rc_lin_a),
+         .rc_rd              (rc_rd),
+         .rc_wr              (rc_wr),
+         .rc_di              (rc_di)
+@@ -1226,6 +1230,8 @@
+         .h_inval_tog      (rc_inval_tog),
+         .h_mreset_tog     (rc_mreset_tog),
+         .h_busy           (rc_busy),
++        .lin              (rc_lin),
++        .lin_a            (rc_lin_a),
+         .a                (rc_a),
+         .rd               (rc_rd),
+         .wr               (rc_wr),
+--- a/esp32t/src/rtl/EMU/emu_system_top.v
++++ b/esp32t/src/rtl/EMU/emu_system_top.v
+@@ -90,6 +90,8 @@
+     input               rc_hold,            // hold the core in reset (a game being loaded)
+     input   [7:0]       rc_q,
+     input               rc_stall,
++    output              rc_lin,
++    output  [21:0]      rc_lin_a,
+     output  [15:0]      rc_a,
+     output              rc_rd,
+     output              rc_wr,
+@@ -159,421 +161,295 @@
+         
+     end
+ 
+-    wire [3:0] btn_key = {
+-        BTN_DPAD_DOWN_filtered_dir, 
+-        BTN_DPAD_UP_filtered_dir,
+-        BTN_DPAD_LEFT_filtered_dir, 
+-        BTN_DPAD_RIGHT_filtered_dir
+-    }; 
+-     
+-    wire [3:0] dpad_key = {
+-        BTN_START_filtered,
+-        BTN_SEL_filtered,
+-        BTN_B_filtered,
+-        BTN_A_filtered
+-    };
+-
+-    reg [3:0] joy_din;
+-    wire [1:0] joy_p54;
+-    always@(posedge hclk)
+-    begin
+-        case(joy_p54)
+-            2'b00: joy_din <= (~btn_key) & (~dpad_key); 
+-            2'b01: joy_din <= ~dpad_key;
+-            2'b10: joy_din <= ~btn_key; 
+-            2'b11: joy_din <= 4'hF;
+-        endcase
+-    end
+-
+-    wire wr;
+-    wire rd;
+-    wire [7:0] CART_DOUT;
+-    wire nCS;
+-
+-    wire [7:0]  CART_DIN; 
+-    assign CART_DIN = CART_D_IN;
+-
+-    wire cpu_speed;
+-    wire cpu_halt;
+-    wire cpu_stop;
+-    
+-    wire [7:0] CART_DIN_r1;
+-    wire [15:0] a;
+-    wire [2:0] TSTATEo;
+-    wire sleep_savestate;
+-
+-    speedcontrol u_speedcontrol
+-    (
+-        .clk_sys     (hclk),
+-        .pause       (sleep_savestate),
+-        .stall       (rc_stall),
+-        .speedup     (),
+-        .cart_act    (rd | wr),
+-        .DMA_on      (),
+-        .ce          (ce),
+-        .ce_2x       (ce_2x),
+-        .refresh     (),
+-        .ff_on       ()
+-    );
+-
+-    wire sel_cram = a[15:13] == 3'b101;           // 8k cart ram at $a000
+-    assign rc_a  = a;
+-    assign rc_rd = rd;
+-    assign rc_wr = wr;
+-    assign rc_di = CART_DOUT;
+-    wire cart_oe = (rd & ~a[15]) | (sel_cram & rd);
+-
+-
+-
+-    reg gbreset;
+-    reg gbreset_ungated;
+-    reg CART_RST_r1;
+-    reg CART_RST_r2;
+-    reg ce_2x_r1;
+-    always@(posedge hclk)
+-        ce_2x_r1 <= ce_2x;
+-
+-
+-    // bring out the manufactured reset, will be used to generate black pixels
+-    assign o_emulator_reset = gbreset;
+-
+-    always@(posedge hclk or negedge reset_n)
+-    begin
+-        if(~reset_n)
+-        begin
+-            gbreset <= 1'd1;
+-            gbreset_ungated <= 1'd1;
+-        end
+-        else
+-        begin
+-            // latched_cart_rst_n in "xClk" 75 MHz clock domain and was stretched
+-            // to 256 clock cycles.  This is sufficient to be detected in ~16MHz hclk
+-            // domain.  Use synchronization registers to avoid metastability. 
+-            //
+-            // CART_RST is pulled high ordinarily, pulled low by cartridge under certain 
+-            // circumstances. 
+-            ///
+-            // => using 3-state synchronizer = > safe to false path
+-            CART_RST_r1 <= latched_cart_rst_n;  
+-            CART_RST_r2 <= CART_RST_r1;
+-            // the RAM cart: the slot's powered-off cart holds /RST low; it is not the core's reset then
+-            gbreset_ungated <= ~LCD_INIT_DONE ? 1'b1 : (~CART_RST_r2 & ~rc_on);
+-            if(~ce_2x_r1 & ce_2x & ce)
+-                gbreset <= gbreset_ungated;
+-                
+-            if (MENU_CLOSED & BTN_MENU & BTN_A & BTN_B & BTN_START & BTN_SEL) gbreset <= 1'd1;
+-            
+-            if (~POWER_GOOD) gbreset <= 1'b1;
+-            if (rc_hold) gbreset <= 1'b1;
+-        end
++    // Hard reset: exactly the conditions that reset the Game Boy core in the stock design. top.v turns
++    // the menu off while o_emulator_reset is high (appear_off), so "no game loaded" must not be a reset:
++    // the core then runs idle on a ROM of zeros (black screen), like the stock design with an empty slot.
++    // reset_n comes from another clock domain (memrst, xclk2) and the RAM cart flags from hclk:
++    // everything is synchronized into pclk before it reaches the core's clock enables.
++    wire hard_raw = !reset_n || !POWER_GOOD || !LCD_INIT_DONE || rc_hold ||
++                    (!latched_cart_rst_n && !rc_on) ||
++                    (MENU_CLOSED && BTN_MENU && BTN_A && BTN_B && BTN_START && BTN_SEL);
++    reg [1:0] hard_s = 2'b11, on_s = 2'b00;
++    always @(posedge pclk) begin
++        hard_s <= {hard_s[0], hard_raw};
++        on_s <= {on_s[0], rc_on};
+     end
+-
+-
+-
+-
+-    
+-    wire DMA_on;
+-    wire hdma_active;
+-    cart u_cart
+-    (
+-       .hclk            (hclk           ),
+-       .pclk            (pclk           ),
+-       .ce              (ce             ),
+-       .ce_2x           (ce_2x          ),
+-       .gbreset         (gbreset        ), 
+-       .cpu_speed       (cpu_speed      ),
+-       .cpu_halt        (cpu_halt       ),
+-       .cpu_stop        (cpu_stop       ),
+-       .wr              (wr             ),   // (the RAM cart: cartridge_interface keeps the pins off the core)
+-       .rd              (rd             ),
+-       .a               (a              ),
+-       .CART_DOUT       (CART_DOUT      ),
+-       .nCS             (nCS            ),
+-       .TSTATEo         (TSTATEo        ),
+-       .DMA_on          (DMA_on         ),
+-       .hdma_active     (hdma_active    ),
+-                                        
+-       .CART_A          (CART_A         ),
+-       .CART_CLK        (CART_CLK       ),
+-       .CART_CS         (CART_CS        ),
+-       .CART_D_IN       (CART_D_IN      ),
+-       .CART_D_OUT      (CART_D_OUT     ),
+-       .CART_RD         (CART_RD        ),
+-       .CART_WR         (CART_WR        ),
+-       .CART_DATA_DIR_E (CART_DATA_DIR_E),
+-       .CART_DIN_r1     (CART_DIN_r1    )
++    wire hard = hard_s[1];
++    wire reload = hard || !on_s[1];       // the loader starts over
++    wire loaded, bad;
++    wire idle = !on_s[1] || bad;          // no Game Gear game: RAM cart off, or an image without the marker
++    wire [23:0] rom_a;
++    wire [24:0] dl_a;
++    wire [7:0] dl_d;
++    wire dl_en;
++    wire [7:0] rom_do;
++    gg_rom_loader loader (
++        .clk(pclk), .reset(reload), .q(rc_q), .stall(rc_stall),
++        .rom_a(rom_a), .address(rc_lin_a), .rd(rc_rd),
++        .loaded(loaded), .bad(bad), .rom_do(rom_do), .dl_a(dl_a), .dl_d(dl_d), .dl_en(dl_en)
+     );
+-
+-    wire sc_int_clock2;
+-    wire serial_clk_in;
+-    wire serial_clk_out;
+-    wire serial_data_out;
+-    
+-    reg LINK_IN_r1;
+-    reg LINK_CLK_r1;
+-    reg serial_clk_out_r1;
+-    reg sc_int_clock2_r1;
+-    reg serial_data_out_r1;
+-    always@(posedge hclk)
+-    begin
+-        LINK_IN_r1         <= LINK_IN;
+-        LINK_CLK_r1        <= LINK_CLK;
+-        serial_clk_out_r1  <= serial_clk_out;
+-        sc_int_clock2_r1   <= sc_int_clock2;
+-        serial_data_out_r1 <= serial_data_out;
+-    end
+-
+-
+-    // when sc_int_clock2_r1 == 1'b1 , output => A->B
+-    assign LINK_CLK_DIR_LV = sc_int_clock2_r1; 
+-
+-    assign LINK_CLK = sc_int_clock2_r1 ? serial_clk_out_r1 : 1'bZ;
+-    assign serial_clk_in = LINK_CLK_r1;
+-
+-    wire serial_data_in = LINK_IN_r1;
+-    assign LINK_OUT = serial_data_out_r1;
+-
+-    wire [63:0] SAVE_out_Din  ;
+-    wire [63:0] SAVE_out_Dout ;
+-    wire [25:0] SAVE_out_Adr  ;
+-    wire SAVE_out_rnw  ;                    
+-    wire SAVE_out_ena  ;                                    
+-    wire SAVE_out_done ; 
+-    
+-    reg ss_load = 1'b0;
+-    reg gbreset_1 = 1'b0;
+-    
+-    // synthesis translate_off
+-    always@(posedge hclk)
+-    begin
+-      gbreset_1 <= gbreset;
+-      ss_load   <= 1'b0;
+-      if (gbreset_1 && ~gbreset) ss_load <= 1'b1;
++    assign rc_lin = 1'b1;
++    assign rc_a = 16'd0;
++    assign rc_wr = 1'b0;
++    assign rc_di = 8'd0;
++    wire core_reset = hard || (!idle && !loaded);   // hard reset, or a game's ROM being replayed
++    // The stall is registered: it rises with the address (after a CPU clock enable), and the next clock
++    // enable is at least 3 pclk later, so one pclk of delay never lets an enable through.
++    reg stall_r = 1'b1;
++    always @(posedge pclk) stall_r <= rc_stall;
++    wire run = !core_reset && (idle || !stall_r);
++    wire ce_cpu, ce_vdp, ce_pix, ce_sp;
++    gg_ce_gen enables (.clk(pclk), .reset(core_reset), .run(run),
++        .ce_cpu(ce_cpu), .ce_vdp(ce_vdp), .ce_pix(ce_pix), .ce_sp(ce_sp));
++    wire [8:0] vx, vy;
++    wire [7:0] vcounter_cpu;
++    wire [11:0] color;
++    wire hb, vb, mask_column, smode_M1, smode_M2, smode_M3, smode_M4;
++    wire [15:0] audio_l, audio_r;
++    wire [13:0] ram_a;
++    wire [14:0] nvram_a;
++    wire [7:0] ram_d, ram_q, nvram_d, nvram_q;
++    wire ram_we, nvram_we;
++    // New-data, synchronous block RAM, matching the core's existing RAM wrappers.
++    // Game Gear: 8 KiB of work RAM, 8 KiB of (volatile) cartridge RAM. Block RAM is scarce on the GW5A-25.
++    gg_ram #(.AW(13)) work_ram (
++        .clk(pclk), .a(ram_a[12:0]), .d(ram_d), .we(ram_we && run), .q(ram_q));
++    gg_ram #(.AW(13)) save_ram (
++        .clk(pclk), .a(nvram_a[12:0]), .d(nvram_d), .we(nvram_we && run), .q(nvram_q));
++    video timing (
++        .clk(pclk), .ce_pix(ce_pix), .pal(1'b0), .border(1'b0), .ggres(1'b1),
++        .mask_column(mask_column), .cut_mask(1'b0),
++        .smode_M1(smode_M1), .smode_M2(smode_M2), .smode_M3(smode_M3), .smode_M4(smode_M4),
++        .video_state_in(22'd3), .video_state_set(core_reset), .video_state_out(),
++        .x(vx), .y(vy), .vcounter_cpu(vcounter_cpu), .hsync(), .vsync(), .hblank(hb), .vblank(vb));
++    gg_video_out video_out (
++        .pclk(pclk), .hclk(hclk), .reset(core_reset), .ce_pix(ce_pix),
++        .color(idle ? 12'd0 : color), .hb(hb), .vb(vb),
++        .lcd_data(gb_lcd_data), .lcd_clkena(gb_lcd_clkena),
++        .lcd_mode(gb_lcd_mode), .lcd_vsync(gb_lcd_vsync));
++    assign gb_lcd_on = 1'b1;
++    assign lcd_on_int = 1'b1;
++    assign lcd_off_overwrite = 1'b0;
++    reg reset_h;
++    always @(posedge hclk) reset_h <= core_reset;
++    assign o_emulator_reset = reset_h;
++    reg [15:0] snd_l, snd_r;
++    always @(posedge hclk) begin
++        snd_l <= (core_reset || idle) ? 16'd0 : audio_l;
++        snd_r <= (core_reset || idle) ? 16'd0 : audio_r;
+     end
+-    // synthesis translate_on
+-
+-    wire [15:0] snd_l;  
+-    wire [15:0] snd_r;  
+-
+-
+-
+-    gb u_gb(
+-        .reset(gbreset),
+-
+-        .clk_sys(hclk),
+-        .ce(ce),
+-        .ce_2x(ce_2x),
+-
+-        .isGBC(1'd1),
+-        .real_cgb_boot(1'd0),
+-        .customPaletteEna(customPaletteEna),
+-        .paletteBGIn(paletteBGIn),
+-        .paletteOBJ0In(paletteOBJ0In),
+-        .paletteOBJ1In(paletteOBJ1In),
+-        .gbc_color_temp(gbc_color_temp),
+-
+-        .paletteOff(paletteOff),
+-        .gbc_mode(gbc_mode),
+-        .gpd(gpd),
+-
+-        // cartridge interface
+-        // can adress up to 1MB ROM
+-        .ext_bus_addr(a[14:0]),
+-        .ext_bus_a15(a[15]),
+-        .cart_rd(rd),
+-        .cart_wr(wr),
+-        .cart_do(rc_on ? rc_q : CART_DIN_r1),
+-        .cart_di(CART_DOUT),
+-        .cart_oe(cart_oe),
+-        .TSTATEo(TSTATEo),
+-        .TSTATE1(TSTATE1),
+-        .TSTATE2(TSTATE2),
+-        .TSTATE3(TSTATE3),
+-        .TSTATE4(TSTATE4),
+-        // WRAM or Cart RAM CS
+-        .nCS(nCS),
+-
+-        .cgb_boot_download(1'd0),
+-        .dmg_boot_download(1'd0),
+-        .ioctl_wr(1'd0),
+-        .ioctl_addr(25'd0),
+-        .ioctl_dout(16'd0),
+-
+-        // Bootrom features
+-        .boot_rom_enabled(boot_rom_enabled),
+-
+-        .boot_gba_en(1'd0),
+-        .fast_boot_en(1'd0),
+-        .boot_alt(boot_alt),
+-        // audio
+-        .audio_l(snd_l),
+-        .audio_r(snd_r),
+-
+-        // Megaduck?
+-        .megaduck(1'd0),
+-
+-        .IR_RX(IR_RX),
+-        .IR_LED(IR_LED),
+-
+-        // lcd interface
+-        .lcd_clkena(gb_lcd_clkena),
+-        .lcd_data(gb_lcd_data),
+-        //      .lcd_data_gb(),
+-        .lcd_mode(gb_lcd_mode),
+-        .lcd_on(gb_lcd_on),
+-        .lcd_vsync(gb_lcd_vsync),
+-
+-        .joy_p54(joy_p54),
+-        .joy_din(joy_din),
+-
+-        .lcd_on_int(lcd_on_int),
+-        .lcd_off_overwrite(lcd_off_overwrite),
+-
+-        .speed(cpu_speed),   //GBC
+-        .cpu_stop(cpu_stop),
+-        .cpu_halt(cpu_halt),
+-        .DMA_on(DMA_on),
+-        .hdma_active(hdma_active),
+-        .gg_reset(1'd0),
+-        .gg_en(1'd0),
+-        .gg_code(129'd0),
+-        .gg_available(),
+-
+-        //serial port
+-        .sc_int_clock2(sc_int_clock2),
+-        .serial_clk_in(serial_clk_in),
+-        .serial_clk_out(serial_clk_out),
+-        .serial_data_in(serial_data_in),
+-        .serial_data_out(serial_data_out),
+-        .net_en(net_en),
+-        .net_master_reply_pend(net_master_reply_pend),
+-        .net_master_reply_byte(net_master_reply_byte),
+-        .net_master_reply_drop(net_master_reply_drop),
+-        .net_barrier_en(net_barrier_en),
+-        .net_master_reply_ack(net_master_reply_ack),
+-        .net_slave_xfer_pend(net_slave_xfer_pend),
+-        .net_slave_xfer_byte(net_slave_xfer_byte),
+-        .net_slave_xfer_ack(net_slave_xfer_ack),
+-        .net_standing_en(net_standing_en),
+-        .net_slave_withdraw_pend(net_slave_withdraw_pend),
+-        .net_slave_withdraw_ack(net_slave_withdraw_ack),
+-        .net_ev_valid(net_ev_valid),
+-        .net_ev_type(net_ev_type),
+-        .net_ev_byte(net_ev_byte),
+-        .nw_cpu_addr(nw_cpu_addr),
+-        .nw_cpu_do(nw_cpu_do),
+-        .nw_cpu_rd_n(nw_cpu_rd_n),
+-        .nw_cpu_wr_stb(nw_cpu_wr_stb),
+-        .nw_sel(nw_sel),
+-        .nw_do(nw_do),
+-
+-        // savestates
+-        .increaseSSHeaderCount(1'd0),
+-        .cart_ram_size(8'd0),
+-        .save_state(1'd0),
+-        .load_state(ss_load),
+-        .savestate_number(2'd0),
+-        .sleep_savestate(sleep_savestate),
+-
+-        .SaveStateExt_Din(), 
+-        .SaveStateExt_Adr(), 
+-        .SaveStateExt_wren(),
+-        .SaveStateExt_rst(), 
+-        .SaveStateExt_Dout(64'd0),
+-        .SaveStateExt_load(),
+-
+-        .Savestate_CRAMAddr(),     
+-        .Savestate_CRAMRWrEn(),    
+-        .Savestate_CRAMWriteData(),
+-        .Savestate_CRAMReadData(8'd0),
+-
+-        .SAVE_out_Din  (SAVE_out_Din ),    // data read from savestate
+-        .SAVE_out_Dout (SAVE_out_Dout),  // data written to savestate
+-        .SAVE_out_Adr  (SAVE_out_Adr ),    // all addresses are DWORD addresses!
+-        .SAVE_out_rnw  (SAVE_out_rnw ),     // read = 1, write = 0
+-        .SAVE_out_ena  (SAVE_out_ena ),     // one cycle high for each action
+-        .SAVE_out_done (SAVE_out_done),    // should be one cycle high when write is done or read value is valid
+-
+-        .rewind_on(1'd0),
+-        .rewind_active(1'd0)
+-
++    audio_filter u_audio_filter (.reset(~reset_n), .clk(hclk),
++        .core_l(snd_l), .core_r(snd_r), .filter_l(left), .filter_r(right));
++    assign CART_A = 16'd0;
++    assign CART_CLK = 1'b1;
++    assign CART_CS = 1'b1;
++    assign CART_RD = 1'b1;
++    assign CART_WR = 1'b1;
++    assign CART_D_OUT = 8'd0;
++    assign CART_DATA_DIR_E = 1'b1;
++    assign LINK_CLK = 1'bz;
++    assign LINK_CLK_DIR_LV = 1'b0;
++    assign LINK_OUT = 1'b1;
++    assign IR_LED = 1'b0;
++    assign boot_rom_enabled = 1'b0;
++    assign gbc_mode = 1'b1;
++    assign gpd = 64'd0;
++    assign net_master_reply_ack = 1'b0;
++    assign net_slave_xfer_ack = 1'b0;
++    assign net_slave_withdraw_ack = 1'b0;
++    assign net_ev_valid = 1'b0;
++    assign net_ev_type = 3'd0;
++    assign net_ev_byte = 8'd0;
++    assign nw_cpu_addr = 16'd0;
++    assign nw_cpu_do = 8'd0;
++    assign nw_cpu_rd_n = 1'b1;
++    assign nw_cpu_wr_stb = 1'b0;
++    // GHDL simulation has these same generics baked into system_sim.v.
++`ifdef VERILATOR
++    system sms (
++`else
++    system #(.SYSTEM_E(0), .MAX_SPPL(7), .EXTERNAL_BIOS(0)) sms (
++`endif
++        .clk_sys(pclk),
++        .ce_cpu(ce_cpu),
++        .ce_vdp(ce_vdp),
++        .ce_pix(ce_pix),
++        .ce_sp(ce_sp),
++        .turbo(1'b0),
++        .gg(1'b1),
++        .ggres(1'b1),
++        .systeme(1'b0),
++        .bios_en(1'b0),
++        .ext_bios_sel(1'b0),
++        .ext_bios_loaded(1'b0),
++        .gg_bios_en(1'b0),
++        .ext_gg_bios_loaded(1'b0),
++        .GG_BIOSWEN(1'b0),
++        .GG_EN(1'b1),
++        .GG_CODE(129'd0),
++        .GG_RESET(core_reset),
++        .GG_AVAIL(),
++        .gg_link_en(1'b0),
++        .gg_link_in(7'd0),
++        .gg_link_out(),
++        .RESET_n(!core_reset),
++        .rom_rd(),
++        .rom_a(rom_a),
++        .rom_do(idle ? 8'h00 : rom_do),
++        .j1_up(!BTN_DPAD_UP_filtered_dir),
++        .j1_down(!BTN_DPAD_DOWN_filtered_dir),
++        .j1_left(!BTN_DPAD_LEFT_filtered_dir),
++        .j1_right(!BTN_DPAD_RIGHT_filtered_dir),
++        .j1_tl(!BTN_B_filtered),
++        .j1_tr(!BTN_A_filtered),
++        .j1_th(1'b1),
++        .j1_start(!BTN_START_filtered),
++        .j1_coin(1'b1),
++        .j1_a3(!BTN_START_filtered),
++        .j2_up(1'b1),
++        .j2_down(1'b1),
++        .j2_left(1'b1),
++        .j2_right(1'b1),
++        .j2_tl(1'b1),
++        .j2_tr(1'b1),
++        .j2_th(1'b1),
++        .j2_start(1'b1),
++        .j2_coin(1'b1),
++        .j2_a3(1'b1),
++        .pause(!BTN_START_filtered),
++        .soft_reset(1'b0),
++        .E0Type(2'd0),
++        .E1Use(1'b0),
++        .E2Use(1'b0),
++        .E0(8'hff),
++        .F2(8'hff),
++        .F3(8'hff),
++        .has_paddle(1'b0),
++        .has_pedal(1'b0),
++        .paddle(8'd0),
++        .paddle2(8'd0),
++        .pedal(8'd0),
++        .sc3000_en(1'b0),
++        .sc_multicart_en(1'b0),
++        .sc_megacart_en(1'b0),
++        .sc_cart_ram(2'd0),
++        .sk1100_en(1'b0),
++        .sk1100_row_sel(),
++        .sk1100_row_data(12'hfff),
++        .j1_tr_out(),
++        .j1_th_out(),
++        .j2_tr_out(),
++        .j2_th_out(),
++        .x(vx),
++        .y(vy),
++        .vcounter_cpu(vcounter_cpu),
++        .color(color),
++        .palettemode(1'b0),
++        .mask_column(mask_column),
++        .black_column(1'b0),
++        .smode_M1(smode_M1),
++        .smode_M2(smode_M2),
++        .smode_M3(smode_M3),
++        .smode_M4(smode_M4),
++        .ysj_quirk(1'b0),
++        .pal(1'b0),
++        .region(1'b0),
++        .mapper_lock(1'b0),
++        .mapper_codies_force(1'b0),
++        .mapper_dahjee_a_force(1'b0),
++        .mapper_linear_force(1'b0),
++        .mapper_zemina_force(1'b0),
++        .mapper_evolution_force(1'b0),
++        .evolution_gg_active(),
++        .evolution_active(),
++        .mapper_eeprom_out(),
++        .vdp_enables(2'd0),
++        .psg_enables(2'd0),
++        .audioL(audio_l),
++        .audioR(audio_r),
++        .fm_ena(1'b0),
++        .dbr(loaded),
++        .sp64(1'b0),
++        .ram_a(ram_a),
++        .ram_d(ram_d),
++        .ram_we(ram_we),
++        .ram_q(ram_q),
++        .nvram_a(nvram_a),
++        .nvram_d(nvram_d),
++        .nvram_we(nvram_we),
++        .nvram_q(nvram_q),
++        .encrypt(2'd0),
++        .key_a(),
++        .key_d(8'd0),
++        .ROMCL(pclk),
++        .ROMAD(dl_a),
++        .ROMDT(dl_d),
++        .ROMEN(dl_en),
++        .BIOSWEN(1'b0),
++        .z80_reg_out(),
++        .z80_dir(230'd0),
++        .z80_set(1'b0),
++        .vdp_regs_out(),
++        .vdp_regs_in(128'd0),
++        .vdp_regs_set(1'b0),
++        .vdp_cram_out(),
++        .ss_cram_wr(1'b0),
++        .ss_cram_A(5'd0),
++        .ss_cram_D(12'd0),
++        .ss_vram_en(1'b0),
++        .ss_vram_A(15'd0),
++        .ss_vram_D(),
++        .ss_vram_WE(1'b0),
++        .ss_vram_WA(15'd0),
++        .ss_vram_WD(8'd0),
++        .psg_out(),
++        .psg_in(56'd0),
++        .psg_set(1'b0),
++        .psg_ext_out(),
++        .psg2_ext_out(),
++        .psg_ext_in(96'd0),
++        .psg2_ext_in(96'd0),
++        .psg_div_out(),
++        .psg_div_in(4'd0),
++        .audio_control_out(),
++        .audio_control_in(11'd0),
++        .audio_quiescent(),
++        .audio_phase_out(),
++        .audio_phase_in(1'b0),
++        .audio_phase_set(1'b0),
++        .audio_ext_set(1'b0),
++        .mapper_out(),
++        .mapper_in(64'd0),
++        .mapper_set(1'b0),
++        .evolution_ss_out(),
++        .evolution_ss_in(96'd0),
++        .evolution_ss_set(1'b0),
++        .eeprom_ss_out(),
++        .eeprom_ss_in(64'd0),
++        .eeprom_ss_set(1'b0),
++        .z80_m1_n(),
++        .z80_mreq_n(),
++        .z80_iset(),
++        .vdp2_regs_out(),
++        .vdp2_regs_in(128'd0),
++        .vdp2_regs_set(1'b0),
++        .vdp2_cram_out(),
++        .ss_cram2_wr(1'b0),
++        .ss_cram2_A(5'd0),
++        .ss_cram2_D(12'd0),
++        .ss_vram2_en(1'b0),
++        .ss_vram2_A(15'd0),
++        .ss_vram2_D(),
++        .ss_vram2_WE(1'b0),
++        .ss_vram2_WA(15'd0),
++        .ss_vram2_WD(8'd0),
++        .psg2_out(),
++        .psg2_in(56'd0),
++        .psg2_set(1'b0),
++        .io_state_out(),
++        .io_state_in(32'd0),
++        .io_state_set(1'b0),
++        .se_pause(1'b0),
++        .ss_freeze(1'b0)
+     );
+-    
+-    audio_filter u_audio_filter
+-    (
+-       .reset    (~reset_n),
+-       .clk      (hclk),
+-
+-       .core_l   (snd_l),
+-       .core_r   (snd_r),
+-
+-       .filter_l (left),
+-       .filter_r (right)
+-    );
+-    
+-// synthesis translate_off
+-   wire DDRAM_CLK            ;
+-   wire DDRAM_BUSY           ;
+-   wire [7:0]  DDRAM_BURSTCNT;
+-   wire [28:0] DDRAM_ADDR    ;
+-   wire [63:0] DDRAM_DOUT    ;
+-   wire DDRAM_DOUT_READY     ;
+-   wire DDRAM_RD             ;
+-   wire [63:0] DDRAM_DIN     ;   
+-   wire [7:0]  DDRAM_BE      ;   
+-   wire DDRAM_WE             ;
+-
+-   wire [27:1] ch1_addr;         
+-   wire [63:0] ch1_dout;         
+-   wire [63:0] ch1_din ;         
+-   wire [7:0]  ch1_be  ;         
+-   wire ch1_req        ;  
+-   wire ch1_rnw        ;  
+-   wire ch1_ready      ;  
+-    
+-   ddram iddram
+-   (
+-      .DDRAM_CLK        (hclk),      
+-      .DDRAM_BUSY       (DDRAM_BUSY),      
+-      .DDRAM_BURSTCNT   (DDRAM_BURSTCNT),  
+-      .DDRAM_ADDR       (DDRAM_ADDR),      
+-      .DDRAM_DOUT       (DDRAM_DOUT),      
+-      .DDRAM_DOUT_READY (DDRAM_DOUT_READY),
+-      .DDRAM_RD         (DDRAM_RD),        
+-      .DDRAM_DIN        (DDRAM_DIN),       
+-      .DDRAM_BE         (DDRAM_BE),        
+-      .DDRAM_WE         (DDRAM_WE),                
+-                
+-      .ch1_addr         (ch1_addr),        
+-      .ch1_dout         (ch1_dout),        
+-      .ch1_din          (ch1_din),  
+-      .ch1_be           (ch1_be),      
+-      .ch1_req          (ch1_req),         
+-      .ch1_rnw          (ch1_rnw),         
+-      .ch1_ready        (ch1_ready)
+-   );
+-   
+-   assign ch1_addr      = { SAVE_out_Adr[25:0], 1'b0 };
+-   assign ch1_din       = SAVE_out_Din;
+-   assign ch1_req       = SAVE_out_ena;
+-   assign ch1_rnw       = SAVE_out_rnw;
+-   assign ch1_be        = 8'hFF; // only required for increaseSSHeaderCount
+-   assign SAVE_out_Dout = ch1_dout;
+-   assign SAVE_out_done = ch1_ready;
+-   
+-   ddrram_model iddrram_model
+-   (
+-      .DDRAM_CLK        (hclk),      
+-      .DDRAM_BUSY       (DDRAM_BUSY),      
+-      .DDRAM_BURSTCNT   (DDRAM_BURSTCNT),  
+-      .DDRAM_ADDR       (DDRAM_ADDR),      
+-      .DDRAM_DOUT       (DDRAM_DOUT),      
+-      .DDRAM_DOUT_READY (DDRAM_DOUT_READY),
+-      .DDRAM_RD         (DDRAM_RD),        
+-      .DDRAM_DIN        (DDRAM_DIN),       
+-      .DDRAM_BE         (DDRAM_BE),        
+-      .DDRAM_WE         (DDRAM_WE)       
+-   );
+-// synthesis translate_on
+-    
+ endmodule
+--- a/esp32t/src/rtl/EMU/ramcart.v
++++ b/esp32t/src/rtl/EMU/ramcart.v
+@@ -35,6 +35,8 @@
+     input              h_mreset_tog,       // a toggle: reset the mapper without changing h_on
+     output             h_busy,             // an invalidate / request is still running
+     // ---------------- the core's cart bus (hclk) ----------------
++    input              lin,             // linear read offset relative to ROM_BASE
++    input      [21:0]  lin_a,
+     input      [15:0]  a,
+     input              rd,
+     input              wr,
+@@ -113,7 +115,7 @@
+                        (h_mbc == 3'd2) ? 4'd0 : ram_bank;
+     wire [21:0] rom_off  = {rbank[7:0] & h_rom_mask, a[13:0]};
+     wire [16:0] cram_off = (h_mbc == 3'd2) ? {8'd0, a[8:0]} : {cbank & h_ram_mask, a[12:0]};
+-    wire [22:0] pa = rom_sel ? (ROM_BASE + {1'b0, rom_off}) : (RAM_BASE + {6'd0, cram_off});
++    wire [22:0] pa = lin ? (ROM_BASE + {1'b0, lin_a}) : rom_sel ? (ROM_BASE + {1'b0, rom_off}) : (RAM_BASE + {6'd0, cram_off});
+ 
+     // what a cart RAM read means
+     wire cram_open = h_ram_has & (ram_en | (h_mbc == 3'd0));   // a plain ROM+RAM cart: always open
+@@ -157,7 +159,7 @@
+     assign h_cw_ready = !h_on && !h_req_busy && ws == W_IDLE && !inval_pend && !wread_pend;
+     reg [15:0] n_fill = 16'd0;
+ 
+-    wire want = h_on & rd & (rom_sel | (cram_sel & cram_open & ~rtc_read));
++    wire want = h_on & rd & (lin | rom_sel | (cram_sel & cram_open & ~rtc_read));
+     assign stall = h_on & ((want & ~hit) | (ws != W_IDLE) | inval_pend);
+     assign h_dbg = {rd, wr, want, hit, tag_ok, stall, h_req_busy, inval_pend, 1'b0, ws, h_mbc, 1'b0, n_fill, a};
+ 
+@@ -220,7 +222,7 @@
+             wr_q <= wr; a_q <= a; di_q <= di;
+             wr_r <= wr_q;
+             if (wr_q) begin wa <= a_q; wdi <= di_q; end
+-            if (h_on && wr_r && !wr_q) begin
++            if (h_on && !lin && wr_r && !wr_q) begin
+                 if (!wa[15]) begin
+                     case (h_mbc)
+                     3'd1: case (wa[14:13])
+@@ -314,7 +316,7 @@
+     // ---- what the core reads: from the registered block RAM outputs, no clock of delay ----
+     always @(*) begin
+         if (!h_on || !rd) q = 8'hFF;
+-        else if (rom_sel) q = la_r[0] ? dq[15:8] : dq[7:0];
++        else if (lin || rom_sel) q = la_r[0] ? dq[15:8] : dq[7:0];
+         else if (!cram_open) q = 8'hFF;
+         else if (rtc_read) begin
+             case (ram_bank[2:0])
+--- a/esp32t/evt1_x2.gprj
++++ b/esp32t/evt1_x2.gprj
+@@ -5,8 +5,8 @@
+     <Version>5</Version>
+     <Device name="GW5A-25A" pn="GW5A-EV25UG256CC1/I0">gw5a25a-013</Device>
+     <FileList>
+-        <File path="src/Gameboy_MiSTer/rtl/hdma.v" type="file.verilog" enable="1"/>
+-        <File path="src/Gameboy_MiSTer/rtl/timer.v" type="file.verilog" enable="1"/>
++        <File path="src/Gameboy_MiSTer/rtl/hdma.v" type="file.verilog" enable="0"/>
++        <File path="src/Gameboy_MiSTer/rtl/timer.v" type="file.verilog" enable="0"/>
+         <File path="src/fifo1k/fifo1k.v" type="file.verilog" enable="1"/>
+         <File path="src/gowin_adc/gowin_adc.v" type="file.verilog" enable="1"/>
+         <File path="src/gowin_pll_preevt/gowin_pll.v" type="file.verilog" enable="1"/>
+@@ -35,20 +35,20 @@
+         <File path="src/rtl/BSP/uart_packet_wrapper_rx.sv" type="file.verilog" enable="1"/>
+         <File path="src/rtl/BSP/uart_packet_wrapper_tx.sv" type="file.verilog" enable="1"/>
+         <File path="src/rtl/BSP/vid_system_top.sv" type="file.verilog" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/cheatcodes.sv" type="file.verilog" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/dpramV.v" type="file.verilog" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/dpram_difV.v" type="file.verilog" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/boot_rom_alt.v" type="file.verilog" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/gb.v" type="file.verilog" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/link.v" type="file.verilog" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/sprites.v" type="file.verilog" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/video.v" type="file.verilog" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/videoBypass.v" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/CORE/cheatcodes.sv" type="file.verilog" enable="0"/>
++        <File path="src/rtl/EMU/CORE/dpramV.v" type="file.verilog" enable="0"/>
++        <File path="src/rtl/EMU/CORE/dpram_difV.v" type="file.verilog" enable="0"/>
++        <File path="src/rtl/EMU/CORE/boot_rom_alt.v" type="file.verilog" enable="0"/>
++        <File path="src/rtl/EMU/CORE/gb.v" type="file.verilog" enable="0"/>
++        <File path="src/rtl/EMU/CORE/link.v" type="file.verilog" enable="0"/>
++        <File path="src/rtl/EMU/CORE/sprites.v" type="file.verilog" enable="0"/>
++        <File path="src/rtl/EMU/CORE/video.v" type="file.verilog" enable="0"/>
++        <File path="src/rtl/EMU/CORE/videoBypass.v" type="file.verilog" enable="0"/>
+         <File path="src/rtl/EMU/audio_filter.v" type="file.verilog" enable="1"/>
+         <File path="src/rtl/EMU/audio_iir1_dsp.v" type="file.verilog" enable="1"/>
+         <File path="src/rtl/EMU/audio_biquad_dsp.v" type="file.verilog" enable="1"/>
+         <File path="src/rtl/EMU/cartridge_interface.v" type="file.verilog" enable="1"/>
+-        <File path="src/rtl/EMU/cart.v" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/cart.v" type="file.verilog" enable="0"/>
+         <File path="src/rtl/EMU/emu_system_top.v" type="file.verilog" enable="1"/>
+         <File path="src/rtl/USB/USBUVCUART/Gowin_PLL_UVC/Gowin_PLL_UVC.v" type="file.verilog" enable="1"/>
+         <File path="src/rtl/USB/USBUVCUART/sync_fifo/sync_rx_pkt_fifo.v" type="file.verilog" enable="1"/>
+@@ -70,12 +70,12 @@
+         <File path="src/rtl/USB/USBUVCUART/uvc_control.v" type="file.verilog" enable="1"/>
+         <File path="src/rtl/USB/USBUVCUART/usbuvcuart_top.v" type="file.verilog" enable="1"/>
+         <File path="src/top.v" type="file.verilog" enable="1"/>
+-        <File path="src/Gameboy_MiSTer/rtl/T80/T80_ALU.vhd" type="file.vhdl" enable="1"/>
+-        <File path="src/Gameboy_MiSTer/rtl/T80/T80_Pack.vhd" type="file.vhdl" enable="1"/>
+-        <File path="src/Gameboy_MiSTer/rtl/T80/T80_Reg.vhd" type="file.vhdl" enable="1"/>
+-        <File path="src/Gameboy_MiSTer/rtl/gb_savestates.vhd" type="file.vhdl" enable="1"/>
+-        <File path="src/Gameboy_MiSTer/rtl/gb_statemanager.vhd" type="file.vhdl" enable="1"/>
+-        <File path="src/Gameboy_MiSTer/rtl/reg_savestates.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/Gameboy_MiSTer/rtl/T80/T80_ALU.vhd" type="file.vhdl" enable="0"/>
++        <File path="src/Gameboy_MiSTer/rtl/T80/T80_Pack.vhd" type="file.vhdl" enable="0"/>
++        <File path="src/Gameboy_MiSTer/rtl/T80/T80_Reg.vhd" type="file.vhdl" enable="0"/>
++        <File path="src/Gameboy_MiSTer/rtl/gb_savestates.vhd" type="file.vhdl" enable="0"/>
++        <File path="src/Gameboy_MiSTer/rtl/gb_statemanager.vhd" type="file.vhdl" enable="0"/>
++        <File path="src/Gameboy_MiSTer/rtl/reg_savestates.vhd" type="file.vhdl" enable="0"/>
+         <File path="src/rtl/BSP/MultiPortRamCtrl.vhd" type="file.vhdl" enable="1"/>
+         <File path="src/rtl/BSP/PSRAMBIST_Burst.vhd" type="file.vhdl" enable="1"/>
+         <File path="src/rtl/BSP/PSRAMController.vhd" type="file.vhdl" enable="1"/>
+@@ -87,15 +87,55 @@
+         <File path="src/rtl/BSP/overlayTimerNumber.vhd" type="file.vhdl" enable="1"/>
+         <File path="src/rtl/BSP/uart/uart_rx.vhd" type="file.vhdl" enable="1"/>
+         <File path="src/rtl/BSP/uart/uart_tx.vhd" type="file.vhdl" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/T80/GBse.vhd" type="file.vhdl" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/T80/T80.vhd" type="file.vhdl" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/T80/T80_MCode.vhd" type="file.vhdl" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/bus_savestates.vhd" type="file.vhdl" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/gbc_snd.vhd" type="file.vhdl" enable="1"/>
+-        <File path="src/rtl/EMU/CORE/speedcontrol.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/CORE/T80/GBse.vhd" type="file.vhdl" enable="0"/>
++        <File path="src/rtl/EMU/CORE/T80/T80.vhd" type="file.vhdl" enable="0"/>
++        <File path="src/rtl/EMU/CORE/T80/T80_MCode.vhd" type="file.vhdl" enable="0"/>
++        <File path="src/rtl/EMU/CORE/bus_savestates.vhd" type="file.vhdl" enable="0"/>
++        <File path="src/rtl/EMU/CORE/gbc_snd.vhd" type="file.vhdl" enable="0"/>
++        <File path="src/rtl/EMU/CORE/speedcontrol.vhd" type="file.vhdl" enable="0"/>
+         <File path="src/board/evt1_x2/evt1_x2.cst" type="file.cst" enable="1"/>
+         <File path="src/board/evt1_x2/evt1_x2.sdc" type="file.sdc" enable="1"/>
+         <File path="sysMon.rao" type="file.gao" enable="0"/>
+         <File path="src/rtl/BSP/tlv320regs.hex" type="file.other" enable="1"/>
++        <File path="src/rtl/EMU/GG/opll_stub.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/gowin_ram.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/gg_ram.v" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/AudioMix.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/cart_eeprom.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/eeprom_93c46.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/evolution_mapper.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/evolution_rom_address.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/io.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/mapper_ctrl.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/mapper_detect.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/memory_bus.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/memory_decode.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/system.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/vdp.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/vdp_background.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/vdp_cram.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/vdp_main.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/vdp_sprites.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/vdp_sprite_shifter.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/video.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/T80/T80.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/T80/T80pa.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/T80/T80s.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/T80/T80_ALU.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/T80/T80_MCode.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/T80/T80_Reg.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/jt89/jt89.vhd" type="file.vhdl" enable="1"/>
++        <File path="src/rtl/EMU/GG/gg_ce_gen.v" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/GG/gg_rom_loader.v" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/GG/gg_video_out.v" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/MC8123.v" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/parts.v" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/SEGASYS1_PRGDEC.v" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/cheatcodes.sv" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/jt89/jt89.v" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/jt89/jt89_mixer.v" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/jt89/jt89_noise.v" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/jt89/jt89_tone.v" type="file.verilog" enable="1"/>
++        <File path="src/rtl/EMU/GG/sms_mister/jt89/jt89_vol.v" type="file.verilog" enable="1"/>
+     </FileList>
+ </Project>
+--- a/esp32t/src/board/evt1_x2/evt1_x2.cst
++++ b/esp32t/src/board/evt1_x2/evt1_x2.cst
+@@ -294,17 +294,5 @@
+ // 18.25 (wifiinst1): the same box as 18.24-capfix-a. The cart data capture flops (cart.v CART_DIN_r1,
+ // falling pclk) cannot be IOB registers once the cart engine also reads the raw pins (CT1104), and
+ // nothing constrains pad -> flop; keep them close to their pads (CART_D = IOT76..IOT91, IOR5).
+-INS_LOC "u_emu_system_top/u_cart/CART_DIN_r1_0_s0" R[10:17]C[72:84];
+-INS_LOC "u_emu_system_top/u_cart/CART_DIN_r1_1_s0" R[10:17]C[72:84];
+-INS_LOC "u_emu_system_top/u_cart/CART_DIN_r1_2_s0" R[10:17]C[72:84];
+-INS_LOC "u_emu_system_top/u_cart/CART_DIN_r1_3_s0" R[10:17]C[72:84];
+-INS_LOC "u_emu_system_top/u_cart/CART_DIN_r1_4_s0" R[10:17]C[72:84];
+-INS_LOC "u_emu_system_top/u_cart/CART_DIN_r1_5_s0" R[10:17]C[72:84];
+-INS_LOC "u_emu_system_top/u_cart/CART_DIN_r1_6_s0" R[10:17]C[72:84];
+-INS_LOC "u_emu_system_top/u_cart/CART_DIN_r1_7_s0" R[10:17]C[72:84];
+ // 18.31 (fpgacomp1): the half-cycle paths from those flops (falling pclk -> rising hclk) to the cart bus outputs and
+ // the RAM cart's write strobe failed by 0.5-2.3 ns across place/route options: their ends go in a box beside them.
+-INS_LOC "u_emu_system_top/u_cart/CART_DATA_DIR_s0" R[8:19]C[66:88];
+-INS_LOC "u_emu_system_top/u_cart/CART_WR_s0" R[8:19]C[66:88];
+-INS_LOC "u_emu_system_top/u_cart/CART_RD_s0" R[8:19]C[66:88];
+-INS_LOC "u_ramcart/wr_q_s0" R[8:19]C[66:88];
+--- a/esp32t/src/board/evt1_x2/evt1_x2.sdc
++++ b/esp32t/src/board/evt1_x2/evt1_x2.sdc
+@@ -48,15 +48,11 @@
+ # List nested CPU instances explicitly: V1.9.12.03 matched cpu/* only at
+ # that level in the routed exception report. These are HDL instance names,
+ # independent of source filenames. Check Regs endpoints in report_exceptions.
+-set_multicycle_path -setup -start -from [get_regs {u_emu_system_top/u_cart/CART_DIN_r1_*}] -to [get_regs {u_emu_system_top/u_gb/cpu/* u_emu_system_top/u_gb/cpu/u0/* u_emu_system_top/u_gb/cpu/u0/Regs/*}] 2
+-set_multicycle_path -hold -start -from [get_regs {u_emu_system_top/u_cart/CART_DIN_r1_*}] -to [get_regs {u_emu_system_top/u_gb/cpu/* u_emu_system_top/u_gb/cpu/u0/* u_emu_system_top/u_gb/cpu/u0/Regs/*}] 1
+ // 18.31 (fpgacomp1): the same read contract for the cart bus flops the CPU's decode of that byte reaches (the write
+ // strobe CART_WR, CART_RD, CART_DATA_DIR in cart.v, the RAM cart's write sampler wr_q): they act on the CPU's wr only at
+ // bus counter steps 1-8 of the NEXT bus cycle, long after the byte last changed; without the exception their half-cycle
+ // path (falling pclk -> rising hclk, through the CPU's instruction decode) failed by 0.04-4.5 ns in every placement of
+ // 18.31, and closed in 18.30 only by its one placement. Data paths into DMA destinations keep their normal checks.
+-set_multicycle_path -setup -start -from [get_regs {u_emu_system_top/u_cart/CART_DIN_r1_*}] -to [get_regs {u_emu_system_top/u_cart/CART_WR_s0 u_emu_system_top/u_cart/CART_RD_s0 u_emu_system_top/u_cart/CART_DATA_DIR_s0 u_ramcart/wr_q_s0}] 2
+-set_multicycle_path -hold -start -from [get_regs {u_emu_system_top/u_cart/CART_DIN_r1_*}] -to [get_regs {u_emu_system_top/u_cart/CART_WR_s0 u_emu_system_top/u_cart/CART_RD_s0 u_emu_system_top/u_cart/CART_DATA_DIR_s0 u_ramcart/wr_q_s0}] 1
+ #set_false_path -from [get_pins {BTN_MENU_filtered_s0/F}] -to [get_regs {u_system_monitor/btnMenu_r1_s0}] 
+ set_max_delay -from [get_ports {CART_D[*]}] -to [get_clocks {hclk}] 13
+ set_max_delay -from [get_clocks {hclk}] -to [get_ports {CART_A[*]}] 14

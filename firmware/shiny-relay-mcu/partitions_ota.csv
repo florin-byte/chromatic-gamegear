@@ -1,0 +1,12 @@
+# Name,   Type, SubType, Offset,   Size
+# Shiny Relay 1.1.0 (owner 2026-10-20): two app slots for the update over Wi-Fi, with rollback.
+# nvs and phy_init stay exactly where they were (the Wi-Fi network, the registration and the pairing
+# survive the change, which the USB installer makes once). The cart staging area is not a partition:
+# it is the slot that is NOT running, plus the 64 KiB after it (cf_usb.h / cf_dev.c stage_*):
+#   running ota_0: save 0x208000, ROM 0x210000-0x400000 (ota_1 + the free top 64 KiB) = the 1.0.x addresses
+#   running ota_1: save 0x208000, ROM 0x010000-0x200000 (ota_0 + the free 64 KiB before otadata)
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+ota_0,    app,  ota_0,   0x10000,  0x1E0000,
+otadata,  data, ota,     0x200000, 0x2000,
+ota_1,    app,  ota_1,   0x210000, 0x1E0000,

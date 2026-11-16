@@ -1,0 +1,2 @@
+# lane cartflash2: + the "cart" data partition (backup slots, save RAM, staged image)
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_cartflash.csv"

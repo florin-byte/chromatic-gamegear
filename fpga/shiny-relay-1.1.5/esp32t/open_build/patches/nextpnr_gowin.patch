@@ -1,0 +1,49 @@
+diff --git a/himbaechel/uarch/gowin/pack.cc b/himbaechel/uarch/gowin/pack.cc
+index a6e9f298..8b1d351f 100644
+--- a/himbaechel/uarch/gowin/pack.cc
++++ b/himbaechel/uarch/gowin/pack.cc
+@@ -167,7 +167,28 @@ void GowinPacker::pack_pll(void)
+             // to this pin.
+             if (ci.bel == BelId()) {
+                 NetInfo *ni = ci.getPort(id_CLKIN);
+-                if (ni && ni->driver.cell && ni->driver.cell->bel != BelId()) {
++                if (ci.type == id_PLLA && ni && ni->driver.cell && ni->driver.cell->bel != BelId()) {
++                    // GW5A-25A: Apicula's pad->PLL table puts every PLL pad at
++                    // X0Y0 (the top-left PLL), so a pad that belongs to another
++                    // PLL ends up feeding nothing. Use mappings proven against
++                    // Gowin-built bitstreams instead (pad bel -> PLL bel, CLKIN
++                    // mux): IOB89A (BPLL_T_IN0) -> bottom PLL (slot 8), CLKIN2.
++                    static const struct {
++                        const char *pad, *pll, *insel;
++                    } gw5a_pll_pads[] = {{"X88Y36/IOBA", "X45Y36/PLL", "CLKIN2"}};
++                    std::string pad = ctx->getBelName(ni->driver.cell->bel).str(ctx);
++                    for (auto &m : gw5a_pll_pads) {
++                        BelId pll_bel = ctx->getBelByNameStr(m.pll);
++                        if (pad == m.pad && pll_bel != BelId() && used_pll_bels.count(pll_bel) == 0) {
++                            log_info("PLLA %s: dedicated input %s -> %s, INSEL %s\n", ctx->nameOf(&ci), m.pad, m.pll,
++                                     m.insel);
++                            used_pll_bels.insert(pll_bel);
++                            ctx->bindBel(pll_bel, &ci, PlaceStrength::STRENGTH_LOCKED);
++                            ci.disconnectPort(id_CLKIN);
++                            ci.setParam(id_INSEL, std::string(m.insel));
++                        }
++                    }
++                } else if (ni && ni->driver.cell && ni->driver.cell->bel != BelId()) {
+                     BelId pll_bel = gwu.get_pll_bel(ni->driver.cell->bel, id_CLKIN_T);
+                     if (ctx->debug) {
+                         log_info("PLL clkin driver:%s at %s, PLL bel:%s\n", ctx->nameOf(ni->driver.cell),
+diff --git a/himbaechel/uarch/gowin/pack_iologic.cc b/himbaechel/uarch/gowin/pack_iologic.cc
+index 80428e79..a49c0ec8 100644
+--- a/himbaechel/uarch/gowin/pack_iologic.cc
++++ b/himbaechel/uarch/gowin/pack_iologic.cc
+@@ -62,7 +62,9 @@ BelId GowinPacker::get_iologici_bel(CellInfo *iob)
+ 
+ void GowinPacker::check_iologic_placement(CellInfo &ci, Loc iob_loc, int diff /* 1 - diff */)
+ {
+-    if (ci.type.in(id_ODDR, id_ODDRC, id_IDDR, id_IDDRC, id_OSER4, id_IOLOGICI_EMPTY, id_IOLOGICO_EMPTY) || diff) {
++    // IDES4, like OSER4, uses only its own IOLOGIC (create_aux_iologic_cell
++    // makes no aux cell for it); GW5A designs put IDES4 on both pins of a pair.
++    if (ci.type.in(id_ODDR, id_ODDRC, id_IDDR, id_IDDRC, id_OSER4, id_IDES4, id_IOLOGICI_EMPTY, id_IOLOGICO_EMPTY) || diff) {
+         return;
+     }
+     BelId l_bel = ctx->getBelByLocation(Loc(iob_loc.x, iob_loc.y, BelZ::IOBA_Z + 1 - (iob_loc.z - BelZ::IOBA_Z)));

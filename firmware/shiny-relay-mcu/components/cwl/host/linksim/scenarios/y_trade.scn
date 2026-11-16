@@ -1,0 +1,42 @@
+# Gen 1 Cable Club trade, Yellow <-> Yellow (compat/run_y_trade.sh in simulated time).
+# A, B = tools/states/y_cc. Pass: "Trade completed" on both, logs mirrored.
+thread A
+sleep 2
+keys a 1.5 a a a a a a
+thread M
+peek a d162 3 party_before
+peek b d162 3 party_before
+sleep 4
+keys b 1.5 a a a a a
+sleep 2
+keys a 1 a
+keys b 1.2 a a
+sleep 8
+keys a 1 a
+sleep 1
+keys b 1 a
+sleep 10
+shot room
+key a right
+key b left
+sleep 1
+keys a 0.5 a
+keys b 0.5 a
+mark seat
+waitx a 100 400
+mark party_data
+sleep 25
+shot menu
+keys ab 0.7 a right a
+sleep 5
+keys ab 1 a
+sleep 3
+keys ab 1 a
+mark trade_start
+waitq a 20 600
+mark trade_quiet
+keys ab 1.5 a a a
+sleep 30
+shot end
+peek a d162 3 party_after
+peek b d162 3 party_after

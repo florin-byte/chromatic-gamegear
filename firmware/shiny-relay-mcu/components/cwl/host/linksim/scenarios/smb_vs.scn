@@ -1,0 +1,61 @@
+# Super Mario Bros. Deluxe VS race (compat/run_smb_vs.sh in simulated time). A, B = tools/states/m_menu.
+# Fast-clock masters (CPU stalls) plus re-arm as slave in the same frame.
+thread M
+sleep 2
+keys ab 0.6 down/8 down/8
+sleep 1
+key a a 8
+sleep 10
+key a a 8
+sleep 10
+shot start
+mark race
+thread R
+sleep 25.2
+key ab right 600
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+key ab right 600
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+key ab right 600
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+shot mid
+key ab right 600
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+keys a 0.3 a/24
+keys b 1.2 a/24
+shot end
+mark end

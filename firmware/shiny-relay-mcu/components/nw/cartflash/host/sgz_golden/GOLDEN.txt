@@ -1,0 +1,14 @@
+ok g1_32k_s13 rom 32768 sgz 17009 blocks 4 raw 2 crc32 a72d705b sha256 485e2955b2393fcbcfddd61cfe8d0b846032c6da54d92a8e150d1c4e02800164
+ok g2_odd_s12 rom 40000 sgz 17751 blocks 10 raw 4 crc32 5195ec83 sha256 849e5ba00fc5c46eaa32cea012bfb8a9cf2e61800e67ec7856e17fcabf53e5aa
+ok g3_64k_s14 rom 65536 sgz 17572 blocks 4 raw 1 crc32 ea8c9e81 sha256 ed09f80cf9e6ba879c7d83d58f0731d7d51fe6f74752bf23e172b698f2cdc033
+ok g4_128k_s13 rom 131072 sgz 34963 blocks 16 raw 4 crc32 2bb32df4 sha256 e71335218ee5278dc53633188038b9f48d22bd7ace263a8bc7591e90e60d8fd6
+bad x1_magic magic
+bad x2_version version
+bad x3_header_crc header crc
+bad x4_block_data block 0 inflate
+bad x5_block_crc block 0 crc
+bad x6_sha256 rom sha256
+bad x7_truncated container length
+bad x8_trailing container length
+bad x9_raw_length block 2 length
+bad xa_flags flags

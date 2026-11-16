@@ -1,0 +1,24 @@
+menu "Shiny Relay debug options (never in a release build)"
+
+config SHINY_RELAY_DEBUG_STATUS_PROBE
+	bool "Answer the CWS? UDP status probe (tools/cws.py)"
+	default n
+	help
+		A 4-byte "CWS?" datagram to the link port (UDP 47820) is answered with
+		~1 KB of counters, the Wi-Fi network name and the relay room code, to
+		whoever sent it (no pairing, no check of the source). Useful on the bench
+		without a USB cable (tools/cws.py); in a release build it would leak the
+		network name and room code to anyone on the LAN and reflect ~250x the
+		request at a spoofed source. Release builds leave it off: the same
+		counters are on the USB console (`cwl status`, `nw status`).
+
+config SHINY_RELAY_DEBUG_ALLOW_HTTP_API
+	bool "Accept http:// API and gateway URLs (a LAN mock backend)"
+	default n
+	help
+		Every device API and network-window gateway request carries a token, so a
+		release build refuses `cwl relay api http://...` and `nw url http://...`
+		(and ignores such a URL stored in NVS by a debug build). Turn on only for
+		a bench build that talks to a mock backend on the local network.
+
+endmenu

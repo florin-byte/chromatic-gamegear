@@ -1,0 +1,2 @@
+# lane cartflash2: release defaults + the cart flash feature (bench use on unit 1 only)
+CONFIG_NW_CARTFLASH=y

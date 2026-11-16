@@ -1,0 +1,27 @@
+--- third_party/oss-cad-suite/lib/python3.11/site-packages/apycula/gowin_pack.py	2026-10-09 04:38:52
++++ third_party/apicula_patched/apycula/gowin_pack.py	2026-10-09 12:17:47
+@@ -5406,7 +5406,12 @@
+         attrvals.append(AttrVal('DRIVE_LEVEL', drive))
+ 
+         pullup_io = [AttrVal('PADDI', 'PADDI'), AttrVal('PULLMODE', 'UP')]
+-        if 'TDO' in io_cfg.cfgs or 'DOUT' in io_cfg.cfgs:
++        # Local patch: a config output pin released as GPIO is an ordinary
++        # unused pin (pulled-up input), as Gowin's tools leave it.
++        a = self.cli_args.args
++        cfg_out = ('TDO' in io_cfg.cfgs and not a.jtag_as_gpio) or \
++                  ('DOUT' in io_cfg.cfgs and not (a.sspi_as_gpio or a.mspi_as_gpio))
++        if cfg_out:
+             pullup_io = [AttrVal('TO', 'INV'), AttrVal('ODMUX_1', '1'), AttrVal('PULLMODE', 'UP')]
+         elif 'RDWR' in io_cfg.cfgs or 'RDWR_B' in io_cfg.cfgs or 'PUDC_B' in io_cfg.cfgs:
+             pullup_io = [AttrVal('PADDI', 'PADDI'), AttrVal('PULLMODE', 'DOWN')]
+@@ -5590,7 +5595,9 @@
+         self.chipdb.get_pll_attr_val(AttrVal('FLOCK', 'ENABLE'), av)
+         self.chipdb.get_pll_attr_val(AttrVal('FLTOP', 'ENABLE'), av)
+         self.chipdb.get_pll_attr_val(AttrVal('A_GMC_SEL', 15), av),
+-        self.chipdb.get_pll_attr_val(AttrVal('A_CLKIN_SEL', 'CLKIN0'), av)
++        # CLKIN mux: nextpnr sets INSEL for a dedicated-pad input (the bottom
++        # PLL's pad is CLKIN2 in Gowin-built bitstreams); CLKIN0 otherwise.
++        self.chipdb.get_pll_attr_val(AttrVal('A_CLKIN_SEL', cell_parms.get('A_INSEL', 'CLKIN0')), av)
+         self.chipdb.get_pll_attr_val(AttrVal('A_VR_EN', 'DISABLE'), av)
+         self.chipdb.get_pll_attr_val(AttrVal('A_SSC_EN', 'FALSE'), av)
+         self.chipdb.get_pll_attr_val(AttrVal('A_CLKFBOUT_PE_COARSE', 0), av)

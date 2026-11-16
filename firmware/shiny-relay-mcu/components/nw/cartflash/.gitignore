@@ -1,0 +1,4 @@
+sm83/build/
+host/cf_sim
+host/*.dSYM
+host/__pycache__/

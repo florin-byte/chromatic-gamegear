@@ -1,0 +1,10 @@
+sec_test
+*.dSYM
+qrhost
+qrshim/
+qr70.txt
+osd_phone_*.png
+wdt_test
+portal_test
+qr62.txt
+logic_test

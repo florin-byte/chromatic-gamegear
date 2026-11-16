@@ -1,0 +1,160 @@
+# Gen 2 Colosseum battle: from the trade receptionist (g_cc / s_cc) walk to the COLOSSEUM one, then the
+# gs_trade dialog + seat walk, then A every 1.5 s. Pass: logs mirrored, both back in the room at the end.
+thread A
+sleep 0.4
+keys a 0.42 down/9 down/9 down/9 right/9 right/9 right/9 right/9 up/9 up/9 up/9
+sleep 2
+keys a 1.5 a a a a a a a
+thread B
+sleep 0.4
+keys b 0.42 down/9 down/9 down/9 right/9 right/9 right/9 right/9 up/9 up/9 up/9
+sleep 5
+keys b 1.5 a a a a a a a
+thread M
+sleep 4.2
+peek a da22 3 party_before
+peek a da30 2 mon1_id_before
+peek b da22 3 party_before
+peek b da30 2 mon1_id_before
+sleep 19.5
+keys ab 1.2 a a a a
+sleep 6
+keys ab 1.2 a a
+sleep 6
+waitq a 4 300
+sleep 2
+keys ab 1.0 a
+sleep 8
+shot room
+keys ab 0.4 up up up up
+keys a 0.4 right right right up up left
+keys b 0.4 left left up up right
+sleep 1
+keys ab 0.5 a
+mark seat
+waitx a 1000 400
+mark party_data
+sleep 10
+shot battle
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+shot end
+mark end

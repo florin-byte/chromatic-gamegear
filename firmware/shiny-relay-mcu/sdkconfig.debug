@@ -1,0 +1,5 @@
+# Bench (debug) build overlay - NEVER for a release image set.
+#   idf.py -B build_debug -D SDKCONFIG=build_debug/sdkconfig \
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.debug" build
+CONFIG_SHINY_RELAY_DEBUG_STATUS_PROBE=y
+CONFIG_SHINY_RELAY_DEBUG_ALLOW_HTTP_API=y

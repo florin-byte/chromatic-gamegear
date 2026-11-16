@@ -1,0 +1,226 @@
+diff -ru a/esp32t/src/rtl/BSP/system_monitor.sv b/esp32t/src/rtl/BSP/system_monitor.sv
+--- a/esp32t/src/rtl/BSP/system_monitor.sv	2026-10-09 18:01:17
++++ b/esp32t/src/rtl/BSP/system_monitor.sv	2026-10-09 18:03:30
+@@ -60,6 +60,14 @@
+     input               link_net_en,
+     input               link_esp_may_sleep,  // CWL: ESP32 may light-sleep while the link is on
+ 
++    // Network window (net_window.v, gclk side): TX channel 11 = address 0x0B
++    input               nw_tx_valid,        // packet ready, held until nw_tx_taken
++    input       [7:0]   nw_tx_len,
++    input       [7:0]   nw_tx_byte,         // payload byte at nw_tx_bytepos (1 clk latency is fine: bytes go out 16+ clks apart)
++    output      [7:0]   nw_tx_bytepos,
++    output              nw_tx_taken,
++    input               nw_esp_awake,       // ESP32 CONFIG says it is awake: no wake preamble
++
+     input               VERSION_DET,
+     output              POWERED_BY_LIPO
+ );
+@@ -68,7 +76,7 @@
+     localparam [1:0] PALETTE_HOTKEY_EVENT_UP   = 2'd1;
+     localparam [1:0] PALETTE_HOTKEY_EVENT_DOWN = 2'd2;
+ 
+-    localparam NUM_CH = 11;
++    localparam NUM_CH = 12;
+     wire [$clog2(NUM_CH)-1:0] tx_channel;
+     wire write_done;
+ 
+@@ -520,8 +528,22 @@
+     wire link_ev_req = link_ev_valid & ~link_ev_req_sent;
+     assign link_ev_taken = write_done && (tx_channel == 10) && link_ev_req_sent;
+ 
++    // Network window: same request-once pattern as the link event.
++    reg nw_req_sent = 1'b0;
++    always@(posedge clk or posedge reset) begin
++        if (reset)
++            nw_req_sent <= 1'b0;
++        else if (nw_tx_taken)
++            nw_req_sent <= 1'b0;
++        else if (nw_tx_valid)
++            nw_req_sent <= 1'b1;
++    end
++    wire nw_tx_req = nw_tx_valid & ~nw_req_sent;
++    assign nw_tx_taken = write_done && (tx_channel == 11) && nw_req_sent;
++
+     wire [NUM_CH-1:0] channelsNewDataValid =
+     {
++        nw_tx_req,                                    // network window packet
+         link_ev_req,                                  // CWL1 link event
+         request_gpd,                                  // Game Palette Data
+         ~menuDisabled | request_SystemStatusExtended, // System Status Extended
+@@ -549,9 +571,11 @@
+                               (tx_channel == 8) ? 8'd4 : // System Status Extended
+                               (tx_channel == 9) ? 8'd8 : // BG Palette Data
+                               (tx_channel == 10) ? 8'd2 : // CWL1 link event
++                              (tx_channel == 11) ? nw_tx_len : // network window (4..132)
+                               8'd1;
+ 
+     wire [7:0] tx_bytepos;
++    assign nw_tx_bytepos = tx_bytepos;   // network window reads its payload byte by position
+ 
+     // new PCB: VERSION_DET == 1'b0
+     // old PCB: VERSION_DET == 1'b1
+@@ -614,6 +638,7 @@
+ 
+             default:         tx_senddata = 8'd0;
+         endcase
++        if (tx_channel == 4'd11) tx_senddata = nw_tx_byte;   // network window
+     end
+ 
+ /*
+@@ -698,7 +723,7 @@
+         .uart_tx_val(uart_tx_val),
+         .uartDisabled(uartDisabled),
+         .menuDisabled(menuDisabled),
+-        .stayAwake(link_net_en & ~link_esp_may_sleep),   // the stock wake preamble while the ESP32 may sleep
++        .stayAwake((link_net_en & ~link_esp_may_sleep) | nw_esp_awake),   // the stock wake preamble while the ESP32 may sleep
+         .write(write),
+         .write_done(write_done),
+         .tx_address(tx_address),
+diff -ru a/esp32t/src/rtl/EMU/CORE/gb.v b/esp32t/src/rtl/EMU/CORE/gb.v
+--- a/esp32t/src/rtl/EMU/CORE/gb.v	2026-10-09 18:01:17
++++ b/esp32t/src/rtl/EMU/CORE/gb.v	2026-10-09 18:01:57
+@@ -116,6 +116,15 @@
+     output       net_ev_valid,
+     output [2:0] net_ev_type,
+     output [7:0] net_ev_byte,
++
++    // Network window (BSP/net_window.v, FF58-FF5F): the CPU bus, out to the
++    // window, and its read data back into the cpu_di mux.
++    output [15:0] nw_cpu_addr,
++    output  [7:0] nw_cpu_do,
++    output        nw_cpu_rd_n,
++    output        nw_cpu_wr_stb,     // one clk_sys pulse per CPU write (same strobe as the I/O registers)
++    input         nw_sel,            // the window answers this address (unlocked, FF58-FF5E)
++    input   [7:0] nw_do,
+     output reg boot_rom_enabled = 1'd1,
+     // savestates
+     input        increaseSSHeaderCount,
+@@ -353,6 +362,7 @@
+         sel_FF74?FF74: // unused register, all bits read/write, only in CGB mode
+         sel_FF75?{1'b1,FF75, 4'b1111}: // unused register, bits 4-6 read/write
+         sel_FF50?{6'b0, fast_boot_en, boot_gba_en}: // MiSTer special instruction register 
++        nw_sel?nw_do:                                     // network window FF58-FF5E (only once unlocked)
+         8'hff;
+ 
+ wire cpu_wr_n;
+@@ -387,6 +397,11 @@
+     else if (ce_cpu) old_cpu_wr_n <= cpu_wr_n;
+ end
+ assign cpu_wr_n_edge = ~(old_cpu_wr_n & ~cpu_wr_n);
++
++assign nw_cpu_addr   = cpu_addr;
++assign nw_cpu_do     = cpu_do;
++assign nw_cpu_rd_n   = cpu_rd_n;
++assign nw_cpu_wr_stb = ce_cpu & ~cpu_wr_n_edge;
+ 
+ 
+ wire genie_ovr;
+diff -ru a/esp32t/src/rtl/EMU/emu_system_top.v b/esp32t/src/rtl/EMU/emu_system_top.v
+--- a/esp32t/src/rtl/EMU/emu_system_top.v	2026-10-09 18:01:17
++++ b/esp32t/src/rtl/EMU/emu_system_top.v	2026-10-09 18:01:57
+@@ -59,6 +59,13 @@
+     output       net_ev_valid,
+     output [2:0] net_ev_type,
+     output [7:0] net_ev_byte,
++    // network window (to net_window in top.v)
++    output [15:0] nw_cpu_addr,
++    output  [7:0] nw_cpu_do,
++    output        nw_cpu_rd_n,
++    output        nw_cpu_wr_stb,
++    input         nw_sel,
++    input   [7:0] nw_do,
+ 
+     output [15:0]       left,
+     output [15:0]       right,
+@@ -429,6 +436,12 @@
+         .net_ev_valid(net_ev_valid),
+         .net_ev_type(net_ev_type),
+         .net_ev_byte(net_ev_byte),
++        .nw_cpu_addr(nw_cpu_addr),
++        .nw_cpu_do(nw_cpu_do),
++        .nw_cpu_rd_n(nw_cpu_rd_n),
++        .nw_cpu_wr_stb(nw_cpu_wr_stb),
++        .nw_sel(nw_sel),
++        .nw_do(nw_do),
+ 
+         // savestates
+         .increaseSSHeaderCount(1'd0),
+diff -ru a/esp32t/src/top.v b/esp32t/src/top.v
+--- a/esp32t/src/top.v	2026-10-09 18:01:17
++++ b/esp32t/src/top.v	2026-10-09 18:01:57
+@@ -594,6 +594,14 @@
+     wire       link_h_ev_valid;
+     wire [2:0] link_h_ev_type;
+     wire [7:0] link_h_ev_byte;
++
++    // network window: GB bus (hClk) and system monitor channel 11 (gClk)
++    wire [15:0] nw_cpu_addr;
++    wire  [7:0] nw_cpu_do;
++    wire        nw_cpu_rd_n, nw_cpu_wr_stb, nw_sel;
++    wire  [7:0] nw_do;
++    wire        nw_g_tx_valid, nw_g_tx_taken, nw_g_esp_awake, nw_g_unlocked;
++    wire  [7:0] nw_g_tx_len, nw_g_tx_byte, nw_g_tx_bytepos;
+     wire       link_g_ev_valid;
+     wire [2:0] link_g_ev_type;
+     wire [7:0] link_g_ev_byte;
+@@ -667,6 +675,12 @@
+         .net_ev_valid          (link_h_ev_valid),
+         .net_ev_type           (link_h_ev_type),
+         .net_ev_byte           (link_h_ev_byte),
++        .nw_cpu_addr           (nw_cpu_addr),
++        .nw_cpu_do             (nw_cpu_do),
++        .nw_cpu_rd_n           (nw_cpu_rd_n),
++        .nw_cpu_wr_stb         (nw_cpu_wr_stb),
++        .nw_sel                (nw_sel),
++        .nw_do                 (nw_do),
+ 
+         .lcd_on_int(lcd_on_int),
+         .lcd_off_overwrite(lcd_off_overwrite),
+@@ -896,6 +910,12 @@
+         .link_cmd_byte  (link_g_cmd_byte),
+         .link_net_en    (link_g_net_en),
+         .link_esp_may_sleep (link_g_esp_may_sleep),
++        .nw_tx_valid    (nw_g_tx_valid),
++        .nw_tx_len      (nw_g_tx_len),
++        .nw_tx_byte     (nw_g_tx_byte),
++        .nw_tx_bytepos  (nw_g_tx_bytepos),
++        .nw_tx_taken    (nw_g_tx_taken),
++        .nw_esp_awake   (nw_g_esp_awake),
+         .VERSION_DET (VERSION_DET),
+         .POWERED_BY_LIPO (powered_by_lipo)
+     );
+@@ -927,6 +947,33 @@
+         .h_ev_valid          (link_h_ev_valid),
+         .h_ev_type           (link_h_ev_type),
+         .h_ev_byte           (link_h_ev_byte)
++    );
++
++    // Network window (NETWORK_WINDOW.md): GB CPU mailbox at FF58-FF5F <-> ESP32.
++    // The UART RX byte stream is sniffed for address 0x11 next to the stock
++    // packet wrapper; FPGA -> ESP32 packets go out on system monitor channel 11.
++    net_window u_net_window (
++        .hclk           (hClk),
++        .h_reset        (emulator_was_reset),
++        .h_cpu_addr     (nw_cpu_addr),
++        .h_cpu_do       (nw_cpu_do),
++        .h_cpu_rd_n     (nw_cpu_rd_n),
++        .h_cpu_wr_stb   (nw_cpu_wr_stb),
++        .h_sel          (nw_sel),
++        .h_do           (nw_do),
++        .gclk           (gClk),
++        .g_reset        (~lock_o),
++        .g_uart_rx_data (uart_rx_data[7:0]),
++        .g_uart_rx_val  (uart_rx_val),
++        .g_tx_valid     (nw_g_tx_valid),
++        .g_tx_len       (nw_g_tx_len),
++        .g_tx_bytepos   (nw_g_tx_bytepos),
++        .g_tx_byte      (nw_g_tx_byte),
++        .g_tx_taken     (nw_g_tx_taken),
++        .g_link_busy    (link_g_net_en),
++        .g_esp_awake    (nw_g_esp_awake),
++        .g_unlocked     (nw_g_unlocked),
++        .g_crc_errors   ()
+     );
+ 
+     UART2

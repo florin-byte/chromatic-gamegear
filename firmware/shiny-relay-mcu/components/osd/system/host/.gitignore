@@ -1,0 +1,10 @@
+play_help_check.c
+shots/
+__pycache__/
+dl_shots
+*.dSYM
+shots_download/
+games_shots
+shots_games/
+gg_shots
+shots_getgames/

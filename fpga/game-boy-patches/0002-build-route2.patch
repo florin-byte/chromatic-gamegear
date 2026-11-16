@@ -1,0 +1,8 @@
+--- a/esp32t/build.tcl
++++ b/esp32t/build.tcl
+@@ -11,4 +11,5 @@
+ # Read the maintained IDE settings on both platforms. Do not silently use the
+ # CLI's different routing/clock-routing defaults.
+ source build_options.tcl
++set_option -route_option 2
+ run all

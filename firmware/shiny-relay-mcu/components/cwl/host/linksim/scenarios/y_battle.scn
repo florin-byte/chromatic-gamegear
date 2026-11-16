@@ -1,0 +1,135 @@
+# Gen 1 Colosseum battle, Yellow <-> Yellow (the y_trade walk, COLOSSEUM, then A presses every 1.5 s).
+# A, B = tools/states/y_cc. Pass: logs mirrored, both reach the battle's end screen.
+thread A
+sleep 2
+keys a 1.5 a a a a a a
+thread M
+peek a d162 3 party_before
+peek b d162 3 party_before
+sleep 4
+keys b 1.5 a a a a a
+sleep 2
+keys a 1 a
+keys b 1.2 a a
+sleep 5
+shot menu0
+keys a 1 down/10
+sleep 1
+shot menu1
+keys a 1 a
+sleep 1
+keys b 1 a
+sleep 10
+shot room
+key a right
+key b left
+sleep 1
+keys a 0.5 a
+keys b 0.5 a
+mark seat
+waitx a 100 400
+mark party_data
+sleep 10
+shot battle
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+keys ab 1.5 a
+shot end
+mark end

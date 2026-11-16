@@ -1,0 +1,14 @@
+/* host build of the card library (lane sdcard1): the firmware's FatFs options */
+#pragma once
+#define CONFIG_FATFS_USE_FASTSEEK 0
+#define CONFIG_FATFS_USE_LABEL 1
+#define CONFIG_FATFS_CODEPAGE 437
+#define CONFIG_FATFS_LFN_HEAP 1
+#define CONFIG_FATFS_MAX_LFN 255
+#define CONFIG_FATFS_API_ENCODING_UTF_8 1
+#define CONFIG_FATFS_VOLUME_COUNT 1
+#define CONFIG_WL_SECTOR_SIZE 4096
+#define CONFIG_FATFS_PER_FILE_CACHE 0
+#define CONFIG_FATFS_FS_LOCK 0
+#define CONFIG_FATFS_TIMEOUT_MS 10000
+#define CONFIG_FATFS_USE_DYN_BUFFERS 0

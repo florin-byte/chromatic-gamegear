@@ -1,0 +1,8 @@
+shl_test
+shl_sameboy
+*.dSYM
+__pycache__
+shl_echo
+shl_burst_sim
+shl_burst_sim.dSYM/
+party_test

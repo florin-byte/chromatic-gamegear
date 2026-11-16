@@ -1,0 +1,173 @@
+"""Builds osd/system/play_help.c: SYSTEM > NETWORK > HOW TO PLAY ONLINE.
+
+The words are those of shiny_gen_3 notes/CHROMATIC_PLAY_ONLINE_HELP.md (the one help
+text, owner request 2026-10-11), in the OSD's capitals, wrapped by the OSD font's real
+glyph widths (fingfai, labels at x 77, the panel edge is 148) into pages of a title and
+5 lines. Since 0.17.9 the device carries a SHORT form (six pages, the last a pointer to
+shinyrelay.com/docs); the full wording lives in that note and on the web.
+
+usage: make_play_help.py FONT.c OUT.c
+"""
+import re
+import sys
+
+FONT, OUT = sys.argv[1], sys.argv[2]
+X0, EDGE, BODY = 77, 146, 5   # 2 px clear of the panel frame at 148
+
+src = open(FONT).read()
+DSC = [tuple(int(v) for v in d) for d in re.findall(
+    r"\{\.bitmap_index = (\d+), \.adv_w = (\d+), \.box_w = (\d+), \.box_h = (\d+), \.ofs_x = (-?\d+), \.ofs_y = (-?\d+)\}", src)]
+
+
+def end_x(text):
+    return X0 + (sum(DSC[ord(c) - 32 + 1][1] for c in text) >> 4)
+
+
+# A row is also cut at kTextLen - 1 CHARACTERS (network.c keeps each row in a char[kTextLen]):
+# 0.17.9's footer " 1/6  A:  NEXT   B:  BACK" is 25 characters and showed as "... B: BA" on a
+# unit (2026-10-11) although its pixels fit. Both limits are checked for every row.
+import os
+_net = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "network.c")).read()
+MAXCH = int(re.search(r"kTextLen = (\d+)", _net).group(1)) - 1
+
+
+def fits(text):
+    return end_x(text) <= EDGE and len(text) <= MAXCH
+
+
+# 0.17.9 (owner 2026-10-11): the 26 pages of 0.17.7 were too long. Six pages, one after the
+# other (no index), the last one a pointer to the full text on the web.
+# (title, [lines]): the lines are broken by hand so a page reads well; each must fit its row
+# (asserted). A line starting with "!" is drawn white.
+SECTIONS = [
+    ("1 PAIR", [
+        "SYSTEM > ONLINE,",
+        "press A. Scan the",
+        "QR code, or enter",
+        "the code at",
+        "shinygen.ai/link",
+    ]),
+    ("2 INVITE (NO CODE)", [
+        "App: MULTIPLAYER,",
+        "HOST, INVITE MY",
+        "CHROMATIC. Here:",
+        "start the game,",
+        "MULTIPLAYER.",
+    ]),
+    ("3 ROOM CODE", [
+        "In the game choose",
+        "MULTIPLAYER. HOST",
+        "shows your code.",
+        "JOIN CODE: enter",
+        "theirs, press A.",
+    ]),
+    ("4 LINK-CABLE", [
+        "Nearby: set LINK",
+        "CABLE to NEARBY on",
+        "both. Online: join",
+        "a room, then start",
+        "the link mode.",
+    ]),
+    ("5 NOT CONNECTING", [
+        "Check:",
+        "SYSTEM > WI-FI",
+        "SYSTEM > ONLINE",
+        "Both players need",
+        "the same game.",
+    ]),
+    # SHINYRELAY.COM/DOCS is 8 px too wide for one row in this font: it breaks before the slash
+    ("MORE HELP:", [
+        "",
+        "!shinyrelay.com",
+        "!/docs",
+    ]),
+]
+
+
+def osd_words(text):
+    # The OSD's style: capitals, two spaces between words (the font's space is 1 px).
+    # Web addresses too since 0.17.9: this font's small letters are hard to read.
+    return [w.upper() for w in text.split()]
+
+
+def split_long(word):
+    # A word wider than a line (a web address) breaks after a dot or before a ">".
+    parts, cur = [], ""
+    for ch in word:
+        if cur and not fits(" " + cur + ch):
+            cut = len(cur) if ch == "." else cur.rfind(".")
+            if cut <= 0:
+                parts.append(cur)
+                cur = ch
+                continue
+            parts.append(cur[:cut])
+            cur = cur[cut:] + ch
+        else:
+            cur += ch
+    parts.append(cur)
+    return parts
+
+
+def wrap(text):
+    lines, cur = [], ""
+    words = []
+    for w in osd_words(text):
+        words += split_long(w) if not fits(" " + w) else [w]
+    for w in words:
+        cand = (cur + "  " + w) if cur else w
+        if fits(" " + cand):
+            cur = cand
+        else:
+            lines.append(cur)
+            cur = w
+    lines.append(cur)
+    return [" " + l for l in lines]
+
+
+pages = []      # (title, [BODY lines, "!" = white])
+for title, lines in SECTIONS:
+    t = " " + "  ".join(osd_words(title))
+    assert fits(t), title
+    assert len(lines) <= BODY, title
+    body = []
+    for l in lines:
+        white = l.startswith("!")
+        x = " " + "  ".join(osd_words(l.lstrip("!"))) if l.strip("!") else ""
+        assert fits(x), l
+        body.append(("!" + x) if white else x)
+    pages.append((t, body))
+n = len(pages)
+assert n <= 6, n
+rows = []
+for k, (t, body) in enumerate(pages):
+    body = body + [""] * (BODY - len(body))
+    foot = " %d/%d  A:NEXT  B:BACK" % (k + 1, n) if k + 1 < n else " %d/%d  A,  B:  BACK" % (k + 1, n)
+    for l in [t] + body + [foot]:
+        assert fits(l.lstrip("!")), l
+    rows.append(["!" + t] + body + ["!" + foot])
+# one section: network.c shows no index for a single section, the pages just follow
+sections = [(" HOW  TO  PLAY  ONLINE", 0, n)]
+
+with open(OUT, "w") as f:
+    f.write("// Generated by osd/system/host/make_play_help.py from the one help text\n")
+    f.write("// (shiny_gen_3 notes/CHROMATIC_PLAY_ONLINE_HELP.md). Do not edit by hand.\n")
+    f.write("// A page: row 0 the title, 1-5 the text, 6 the footer; a leading '!' = white.\n")
+    f.write('#include "play_help.h"\n\n')
+    f.write("const char *const g_PlayHelp[][kPlayHelpRows] = {\n")
+    for r in rows:
+        f.write("    {\n")
+        for l in r:
+            f.write('        "%s",\n' % l.replace("\\", "\\\\").replace('"', '\\"'))
+        f.write("    },\n")
+    f.write("};\n")
+    f.write("const int g_PlayHelpPages = %d;\n\n" % len(rows))
+    f.write("const PlayHelpSection_t g_PlayHelpSections[] = {\n")
+    for label, first, n in sections:
+        f.write('    { "%s", %d, %d },\n' % (label.strip(), first, n))
+    f.write("};\n")
+    f.write("const int g_PlayHelpNumSections = %d;\n" % len(sections))
+print("%d pages in %d sections: %s" % (len(rows), len(sections), [n for _, _, n in sections]))
+for i, r in enumerate(rows):
+    print("--- page %d" % (i + 1))
+    for l in r:
+        print("  %3d px %2d ch |%s|" % (end_x(l.lstrip("!")), len(l.lstrip("!")), l))

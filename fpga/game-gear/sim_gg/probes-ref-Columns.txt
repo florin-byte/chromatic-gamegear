@@ -1,0 +1,8 @@
+probe 0A a=2861 fills=2980 flags=1b15
+probe 0B a=0000 fills=0040 flags=2040
+probe 1A a=6000 fills=ad19 flags=5259
+probe 1B a=240f fills=6041 flags=71fb
+probe 2A a=0000 fills=1f00 flags=9c3d
+probe 2B a=fff0 fills=0000 flags=a000
+probe 3A a=c041 fills=bbfd flags=d61b
+probe 3B a=0000 fills=0000 flags=e000

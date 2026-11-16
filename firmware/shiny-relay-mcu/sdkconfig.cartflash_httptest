@@ -1,0 +1,2 @@
+# lane cartflash1: TEST builds only: a LAN mock backend over plain http (never a release)
+CONFIG_SHINY_RELAY_DEBUG_ALLOW_HTTP_API=y
