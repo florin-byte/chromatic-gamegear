@@ -19,10 +19,11 @@ No games are included. You need your own ROM files.
 My console: the Game Gear folders on the card, the games in one of them, and Sonic the Hedgehog running.
 
 <p>
-<img src="docs/img/photo-folders.jpg" width="190" alt="The Game Gear folders in the game list">
-<img src="docs/img/photo-games.jpg" width="190" alt="The games of one folder">
+<img src="docs/img/photo-folders.jpg" width="155" alt="The Game Gear folders in the game list">
+<img src="docs/img/photo-games.jpg" width="155" alt="The games of one folder">
+<img src="docs/img/photo-sega.jpg" width="155" alt="The SEGA logo when Sonic the Hedgehog starts">
 <img src="docs/img/photo-sonic-title.jpg" width="190" alt="Sonic the Hedgehog, title screen">
-<img src="docs/img/photo-sonic-play.jpg" width="190" alt="Sonic the Hedgehog, first level">
+<img src="docs/img/photo-sonic-play.jpg" width="155" alt="Sonic the Hedgehog, first level">
 </p>
 
 ## What you see on the console
