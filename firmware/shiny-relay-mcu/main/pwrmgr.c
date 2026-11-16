@@ -1,4 +1,5 @@
 #include "pwrmgr.h"
+#include "pwrmgr_logic.h"
 
 #include "board.h"
 #include "cwl.h"
@@ -40,11 +41,14 @@ static StaticTimer_t IdleTimerBuffer;
 static LowPowerMode_t LPM_Status;
 static SemaphoreHandle_t xSemaphore;
 static StaticSemaphore_t xMutexBuffer;
+// The RAM cart's timer wake while a game plays (cf_rc_dev.c); 0 where it is not built in.
+__attribute__((weak)) uint32_t CfRc_SleepTimerMs(void) { return 0; }
+
 static volatile int64_t ConsoleAwakeUntil_us = 0;
 static int64_t OperationAwakeUntil_us;
 static portMUX_TYPE OperationAwakeLock = portMUX_INITIALIZER_UNLOCKED;
 static volatile uint32_t ConsoleAwake_ms = kConsoleAwake_ms;
-static volatile uint32_t SleepCount = 0, SleepMs = 0, WakeFpga = 0, WakeConsole = 0, WakeOther = 0;
+static volatile uint32_t SleepCount = 0, SleepMs = 0, WakeFpga = 0, WakeConsole = 0, WakeTimer = 0, WakeOther = 0;
 
 // The UART receive line is selected so the MCU wakes up any time the FPGA sends a message
 static const gpio_config_t WakeUpPin = {
@@ -100,7 +104,9 @@ void PwrMgr_Task(void *arg)
             (void) esp_sleep_enable_uart_wakeup(CONFIG_ESP_CONSOLE_UART_NUM);
             // The relay seat keeper (cwl) pings the relay every few minutes
             // while Wi-Fi is off.
-            const uint32_t Timer_ms = CWL_SleepTimerMs();
+            // A game playing from RAM wakes the unit on its own (savefix1): its save write-back poll
+            // (cf_rc_dev.c) is frozen asleep, and nothing else wakes a unit with Wi-Fi dormant.
+            const uint32_t Timer_ms = PwrMgr_PickTimerMs(CWL_SleepTimerMs(), CfRc_SleepTimerMs());
             if (Timer_ms > 0) (void) esp_sleep_enable_timer_wakeup((uint64_t)Timer_ms * 1000u);
             else (void) esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -117,6 +123,7 @@ void PwrMgr_Task(void *arg)
             SleepMs += Slept_ms;
             if (Cause == ESP_SLEEP_WAKEUP_GPIO) WakeFpga++;
             else if (Cause == ESP_SLEEP_WAKEUP_UART) WakeConsole++;
+            else if (Cause == ESP_SLEEP_WAKEUP_TIMER) WakeTimer++;
             else WakeOther++;
             CWL_NoteLightSleep(Slept_ms,
                                Cause == ESP_SLEEP_WAKEUP_GPIO ? kCwlWake_Fpga :
@@ -246,10 +253,10 @@ static int CmdPwr(int argc, char **argv)
         ConsoleAwakeUntil_us = 0;
         return 0;
     }
-    printf("{ \"sleeps\": %lu, \"slept_ms\": %lu, \"wake_fpga\": %lu, \"wake_console\": %lu, \"wake_other\": %lu, "
+    printf("{ \"sleeps\": %lu, \"slept_ms\": %lu, \"wake_fpga\": %lu, \"wake_console\": %lu, \"wake_timer\": %lu, \"wake_other\": %lu, "
            "\"uptime_ms\": %lu, \"console_window_ms\": %lu, \"lpm\": %d }\n",
            (unsigned long)SleepCount, (unsigned long)SleepMs, (unsigned long)WakeFpga, (unsigned long)WakeConsole,
-           (unsigned long)WakeOther, (unsigned long)(esp_timer_get_time() / 1000), (unsigned long)ConsoleAwake_ms,
+           (unsigned long)WakeTimer, (unsigned long)WakeOther, (unsigned long)(esp_timer_get_time() / 1000), (unsigned long)ConsoleAwake_ms,
            PwrMgr_IsLPMActive());
     return 0;
 }

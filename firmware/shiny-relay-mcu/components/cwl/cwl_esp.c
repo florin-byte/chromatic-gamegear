@@ -8,6 +8,7 @@
 #include "cwl_net.h"
 #include "cwl_priv.h"
 #include "cwl_logic.h"
+#include "cwl_time.h"
 #include "sdkconfig.h"
 
 #include "button.h"
@@ -196,6 +197,8 @@ static volatile uint32_t _FpgaRxCrcErrors = 0;
 static volatile uint32_t _FpgaRxLenErrors = 0;
 
 static uint32_t NowMs(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
+// 1.1.7: the radio for the real time (SNTP) at power-on, when a network is saved; short, and gone as soon as the time is set
+static bool TimeWantsRadio(void);
 
 // ---- link modes and paths (PROTOCOL.md "Link modes", "Nearby (ESP-NOW)")
 static volatile CwlMode_t _Mode = kCwlMode_Off;
@@ -445,6 +448,7 @@ static bool RelayOn(void) { return _Mode == kCwlMode_Auto || _Mode == kCwlMode_O
 // then rides the AP's channel).
 static volatile bool _NoApTest = false;   // console `cwl espnow apjoin off`: test without an AP (not saved)
 static bool WantAssoc(void) { return _Settings.Ssid[0] != '\0' && !_NoApTest; }
+static bool TimeWantsRadio(void) { CwlTime_Poll(); return WantAssoc() && CwlTime_Wants(); }
 
 static bool PathFresh(Path_t p, uint32_t now)
 {
@@ -601,6 +605,7 @@ static void WifiEvent(void *arg, esp_event_base_t base, int32_t id, void *data)
             }
         }
         _WifiConnected = true;
+        CwlTime_OnGotIp();
         _ConnFails = 0;
         _ReconnectBackoff = kReconnectMin_ms;
         if (_Pwr.WakeTiming && _Pwr.LastIpMs < 0) _Pwr.LastIpMs = (int32_t)(NowMs() - _Pwr.WakeStartMs);
@@ -800,7 +805,7 @@ static Power_t WantedPower(uint32_t now)
     Power_t p = LinkWantedPower(now);
     // Pairing / an HTTPS call waiting: radio up (they are short). Receive mode polls every few
     // seconds for minutes: the radio stays up (associated, no power save) the whole time.
-    if (CwlOnline_NeedsRadio() || _RecvHoldF) return kPower_Full;
+    if (CwlOnline_NeedsRadio() || _RecvHoldF || TimeWantsRadio()) return kPower_Full;
     if (_KeepActive && p < kPower_Low) p = kPower_Low;   // seat keeper ping
     if (_NwWanted) {
         // A game using the window: flat out for a while after each request,
@@ -1276,7 +1281,7 @@ static void LinkSession(void)
     const uint32_t Gen = _ModeGen;
     _SessModeGen = Gen;
     _InSession = true;
-    while ((LinkEn() || _RecvHoldF || _NwWanted || CwlOnline_NeedsRadio()) && Gen == _ModeGen && !_NetHoldF && !_CartHoldF) {
+    while ((LinkEn() || _RecvHoldF || _NwWanted || CwlOnline_NeedsRadio() || TimeWantsRadio()) && Gen == _ModeGen && !_NetHoldF && !_CartHoldF) {
         now = NowMs();
         if (LinkEn() != LinkWas) {
             LinkWas = LinkEn();
@@ -1438,7 +1443,7 @@ static void LinkTask(void *arg)
         // The link runs without an AP in AUTO / NEARBY (ESP-NOW); the relay,
         // pairing and the network window need one.
         const bool LinkCan = LinkEn() && (_Settings.Ssid[0] != '\0' || EspNowOn());
-        const bool NetCan = (_NwWanted || _RecvHoldF || CwlOnline_NeedsRadio()) && _Settings.Ssid[0] != '\0';
+        const bool NetCan = (_NwWanted || _RecvHoldF || CwlOnline_NeedsRadio() || TimeWantsRadio()) && _Settings.Ssid[0] != '\0';
         bool Ended = false;
         if (CwlLogic_LinkMayRun(LinkCan, NetCan, _NetHoldF, _CartHoldF)) {
             LinkSession();

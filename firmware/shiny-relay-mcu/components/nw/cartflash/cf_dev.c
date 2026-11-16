@@ -302,8 +302,10 @@ static unsigned fpga_ver(void *u)
 }
 #include "cf_rc_dev.h"
 #include "cf_sgz.h"
+#include "cf_sup.h"
 #include "cf_share_dev.h"
 #include "sd.h"
+#include "sd_core.h"
 #include "cf_pack.h"
 #ifdef CONFIG_NW_CARTFLASH_WIFI
 static int jobs_idle(void);
@@ -667,6 +669,7 @@ void CfDev_Tick(void)
 #include "cwl_wdt.h"
 #include "esp_crt_bundle.h"
 #include "cwl_tls.h"
+#include "cwl_time.h"
 #include "esp_http_client.h"
 #include "esp_wifi.h"
 #include "mbedtls/aes.h"
@@ -707,6 +710,12 @@ static struct {
     char why[48];
 } _Net;
 
+/* 1.1.7: the real time from our server's Date when nothing set the clock yet */
+static esp_err_t net_date_ev(esp_http_client_event_t *e)
+{
+    if (e->event_id == HTTP_EVENT_ON_HEADER && e->header_key && e->header_value && !strcasecmp(e->header_key, "Date")) (void)CwlTime_FromHttpDate(e->header_value);
+    return ESP_OK;
+}
 static void net_close(void)
 {
     if (_Net.cli) { esp_http_client_close(_Net.cli); esp_http_client_cleanup(_Net.cli); _Net.cli = NULL; }
@@ -757,7 +766,7 @@ static int net_req(const char *url, const char *scheme, const char *range, const
         heap_note("before the handshake");
         esp_http_client_config_t cfg = {
             .url = url, .timeout_ms = 8000, .buffer_size = 1024, .buffer_size_tx = 1536,
-            .keep_alive_enable = true, .method = HTTP_METHOD_GET,
+            .keep_alive_enable = true, .method = HTTP_METHOD_GET, .event_handler = net_date_ev,
         };
         if (tls) cfg.crt_bundle_attach = CwlTls_Attach;
         _Net.cli = esp_http_client_init(&cfg);
@@ -844,6 +853,7 @@ static int dl_running(void);
 static volatile int _StageErasing;
 static int stage_erase_step(void);
 static int bk_work(void);
+static int up_work(void);                          /* lane savecloud1: SAVE TO MY GAMES's upload */
 static int ota_dl_work(void);
 static int fota_work(void);
 int CfDev_HttpWork(void)
@@ -852,6 +862,7 @@ int CfDev_HttpWork(void)
     if (bk_work()) return 1;                        /* 1.0.6: a backup's hash and upload (its own plain connection) */
     if (ota_dl_work()) return 1;                    /* 1.1.0: an update into the idle slot */
     if (fota_work()) return 1;                      /* 1.1.0: the FPGA boot flash (never on the nw task) */
+    if (up_work()) return 1;                        /* lane savecloud1: a kept game's save up to My games (this task has the TLS stack) */
     if (!_Net.on) return 0;
     if (_Net.stop) { net_close(); net_forget_key(); _Net.on = 0; return 0; }
     if (dl_running()) return dl_work();          /* wifispeed1: the whole image in one GET, into the staging area */
@@ -1459,7 +1470,7 @@ static int dl_work(void)
         if (esp_get_free_heap_size() < CF_NET_PLAIN_HEAP) { _Net.n_heap_waits++; snprintf(_Dl.why, sizeof _Dl.why, "heap"); goto retry; }
         esp_http_client_config_t cfg = {
             .url = _Net.url, .timeout_ms = 8000, .buffer_size = 2048, .buffer_size_tx = 512,
-            .keep_alive_enable = true, .method = HTTP_METHOD_GET,
+            .keep_alive_enable = true, .method = HTTP_METHOD_GET, .event_handler = net_date_ev,
         };
         if (!strncmp(_Net.url, "https:", 6)) cfg.crt_bundle_attach = CwlTls_Attach;   /* (the server's blob URL is plain http) */
         _Dl.cli = esp_http_client_init(&cfg);
@@ -2459,6 +2470,8 @@ static int ci_api_start(void *u, const char *path, const char *body, char *out, 
        server knows the account from it); not paired, not asked (getgames.c says PAIR IN ONLINE FIRST) */
     if (!strncmp(path, "/link_device/my_games", 21) || (strstr(path, "/catalog/order") && strstr(body, "\"mine\":true")))
         return CwlOnline_DeviceCallStart(false, path, body, out, cap) ? 1 : 0;
+    /* 1.1.12, SYSTEM > CUSTOM: the custom build is the paired account's choice for this unit: the PAIRING token too */
+    if (!strcmp(path, "/link_device/fw/custom")) return CwlOnline_DeviceCallStart(false, path, body, out, cap) ? 1 : 0;
     /* wifirecv1: every call of the install machine goes with the unit's registration token */
     return CwlOnline_RecvCallStart(path, body, out, cap) ? 1 : 0;
 }
@@ -3650,7 +3663,12 @@ void CfDev_FwView(NwFwView_t *out)
     snprintf(out->Version, sizeof out->Version, "%s", v.version);
     snprintf(out->Running, sizeof out->Running, "%.15s", esp_app_get_description()->version);
     out->Pct = v.pct;
-    if (v.kind == OV_MENU) { ota_rec_t r; out->ReadyWaits = !ota_rec_load(&r, "ready"); if (out->ReadyWaits) snprintf(out->Version, sizeof out->Version, "%s", r.ver); }
+    out->Custom = v.custom;
+    snprintf(out->Name, sizeof out->Name, "%s", v.name);
+    if (v.kind == OV_MENU) {
+        ota_rec_t r; out->ReadyWaits = !ota_rec_load(&r, "ready");
+        if (out->ReadyWaits) { snprintf(out->Version, sizeof out->Version, "%s", r.ver); out->Custom = cf_ota_is_custom(r.ver); }
+    }
     /* fpgacomp1: an FPGA install that runs, or the recovery design with an install to finish / just finished */
     fota_rec_t f;
     const int rec = fpga_recovery();
@@ -3667,6 +3685,7 @@ void CfDev_FwView(NwFwView_t *out)
     }
 }
 void CfDev_FwButton(int a) { if (_OtaP && !(a == 1 && _OtaP->st == OT_IDLE && cf_install_busy(&_Inst))) cf_ota_button(_OtaP, a); }
+void CfDev_FwCustom(void) { if (_OtaP && _OtaP->st == OT_IDLE && !cf_install_busy(&_Inst)) cf_ota_custom(_OtaP); }
 #else  /* no Wi-Fi install in this build (the USB route only) */
 int CfDev_HttpWork(void) { return stage_erase_step(); }
 void CfDev_View(NwCartView_t *out) { memset(out, 0, sizeof *out); out->Kind = -1; }
@@ -3678,6 +3697,7 @@ int  CfDev_GgReady(void) { return 0; }
 int  CfDev_GgActive(void) { return 0; }
 void CfDev_FwView(NwFwView_t *out) { memset(out, 0, sizeof *out); out->Kind = -1; }
 void CfDev_FwButton(int a) { (void)a; }
+void CfDev_FwCustom(void) { }
 #endif /* CONFIG_NW_CARTFLASH_WIFI */
 
 /* ---- the USB console protocol (cf_usb.c, docs/CART_BACKUP_USB_PROTOCOL.md) */
@@ -3833,6 +3853,7 @@ bool CfDev_KeepAwake(void)
     /* a Wi-Fi install between its steps (a poll, the header, a report) or not finished: light sleep
        stalled the resume poll on unit 2 for minutes, until the console woke the unit (wifiinst1) */
     if (cf_install_busy(&_Inst) || _Net.on) return true;
+    if (_OtaPending) return true;        /* 1.1.9: a new version not confirmed yet: a nap would hold its confirm off, and a power cycle then rolls it back */
 #endif
     return _CartCmdMs != 0 && (uint32_t)(now_ms() - _CartCmdMs) < 60000u;
 }
@@ -4881,6 +4902,178 @@ static int gj_lib_to_card(uint32_t uid, char *res, size_t n)
     snprintf(res, n, "COPIED  TO  THE  CARD|");
     return 0;
 }
+
+/* ---- lane savecloud1: SAVE TO MY GAMES (SYSTEM > GAMES > a game kept ON CHROMATIC). cf_sup.c decides (host-tested); this is
+ * the connection, the flash read and the job. The job runs on the card's task (kSdJob_SaveToCloud, as the other GAMES jobs: its
+ * percent and words reach the page, B hides it), the link is stopped first as receive mode stops it (ci_hold: the handshake needs
+ * ~21 KB) and comes back on EVERY path out (one exit), and the upload itself is stepped on the nw HTTP task (CfDev_HttpWork:
+ * the task that has the TLS stack; the card's and the RAM cart's are 4 KB). The save is read by its extents
+ * (CfRc_LibShareRead, as SHARE does: not through the open library, which is closed meanwhile for its ~5.5 KB) and is never
+ * written: a failure cannot change the stored save. */
+#define UP_URL_MAX   256
+#define UP_TLS_FREE  21000u        /* the link task's own gate (cwl_online.c kTlsMinHeap) */
+#define UP_TLS_BLOCK 8192u
+static struct {
+    volatile int on, done, stop;
+    cf_sup_t *s;
+    cf_lib_ent_t e;
+    cf_lib_save_t sv;
+    esp_http_client_handle_t cli;
+    uint32_t next_open, heap_waits, opens;
+} _Up;
+/* what goes up is the save and then, for a clock game, its clock: the same 48 bytes the card copy has */
+static uint8_t _UpFt[SDC_RTC_FOOTER];
+static uint32_t _UpFtN;
+static int up_read(void *u, uint32_t off, uint8_t *b, uint32_t n)
+{
+    (void)u;
+    const uint32_t ss = _Up.sv.size;
+    if (off < ss) {
+        const uint32_t k = ss - off < n ? ss - off : n;
+        if (CfRc_LibShareRead(&_Up.e, &_Up.sv, 1, off, b, k)) return -1;
+        off += k; b += k; n -= k;
+    }
+    if (!n) return 0;
+    if (off - ss + n > _UpFtN) return -1;
+    memcpy(b, _UpFt + (off - ss), n);
+    return 0;
+}
+static void up_footer(void)
+{
+    _UpFtN = 0;
+    if (!(_Up.e.flags & CF_LIB_F_RTC)) return;
+    /* when this clock was true, from the save's own record: the same save has the same bytes after a restart too */
+    sdc_rtc_put(_UpFt, _Up.sv.rtc, sdc_tsec_unpack(_Up.sv.tsec, CwlTime_Anchor()));
+    _UpFtN = SDC_RTC_FOOTER;
+}
+static void up_close(void *u)
+{
+    (void)u;
+    if (_Up.cli) { esp_http_client_close(_Up.cli); esp_http_client_cleanup(_Up.cli); _Up.cli = NULL; }
+}
+static int up_open(void *u, const char *target, uint32_t body_len)
+{
+    (void)u;
+    if ((int32_t)(now_ms() - _Up.next_open) < 0) return 1;
+    if (!CWL_IsOnline()) { CWL_SetNetworkWanted(true); CWL_NetworkUse(false, true); _Up.next_open = now_ms() + 500u; return 1; }
+    const char *api = CwlOnline_Api();
+    if (!api || !CwlSec_ApiUrlOk(api)) return -1;        /* (the pairing token goes only to an https API) */
+    CfRc_Trim();                                          /* the check pass's 1 KiB read window: the send pass takes it again */
+    const uint32_t fr = esp_get_free_heap_size(), big = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT);
+    if (fr < UP_TLS_FREE || big < UP_TLS_BLOCK) {
+        if ((_Up.heap_waits++ & 15u) == 0) printf("cf: save to my games: waiting for memory (free %lu, largest %lu)\n", (unsigned long)fr, (unsigned long)big);
+        _Up.next_open = now_ms() + 250u;
+        return 1;
+    }
+    char *url = malloc(UP_URL_MAX);
+    char *auth = malloc(800);
+    if (!url || !auth) { free(url); free(auth); _Up.next_open = now_ms() + 250u; return 1; }
+    snprintf(url, UP_URL_MAX, "%s%s", api, target);
+    memcpy(auth, "Bearer ", 7);
+    const int have = CwlOnline_CopyToken(auth + 7, 800 - 7) > 0;
+    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 10000, .buffer_size = 1024, .buffer_size_tx = 1536, .keep_alive_enable = false, .method = HTTP_METHOD_POST };
+    cfg.crt_bundle_attach = CwlTls_Attach;
+    _Up.cli = have ? esp_http_client_init(&cfg) : NULL;
+    free(url);
+    int r = -1;
+    if (_Up.cli && esp_http_client_set_header(_Up.cli, "Authorization", auth) == ESP_OK &&
+        esp_http_client_set_header(_Up.cli, "Content-Type", "application/octet-stream") == ESP_OK &&
+        esp_http_client_set_header(_Up.cli, "User-Agent", "ShinyChromatic-save/1") == ESP_OK) {
+        memset(auth, 0, 800);                               /* (the client keeps its own copy: these 800 bytes go before the handshake) */
+        free(auth);
+        auth = NULL;
+        _Up.opens++;
+        const int wdt = CwlWdt_LongBegin();                /* the handshake: seconds without a yield */
+        const esp_err_t e = esp_http_client_open(_Up.cli, (int)body_len);
+        CwlWdt_LongEnd(wdt);
+        r = e == ESP_OK ? 0 : -1;
+        if (r) printf("cf: save to my games: could not connect (%s), free heap %lu\n", esp_err_to_name(e), (unsigned long)esp_get_free_heap_size());
+    }
+    if (auth) { memset(auth, 0, 800); free(auth); }         /* (the token is never kept or printed) */
+    if (r) { up_close(NULL); _Up.next_open = now_ms() + 1500u; }
+    return r;
+}
+static int up_write(void *u, const uint8_t *b, uint32_t n) { (void)u; return _Up.cli && esp_http_client_write(_Up.cli, (const char *)b, (int)n) == (int)n ? 0 : -1; }
+static int up_answer(void *u, int *http, char *out, uint32_t cap)
+{
+    (void)u;
+    *http = 0;
+    if (!_Up.cli) return -1;
+    const int64_t h = esp_http_client_fetch_headers(_Up.cli);
+    *http = esp_http_client_get_status_code(_Up.cli);
+    if (h < 0 || *http <= 0) return -1;
+    uint32_t n = 0;
+    while (n + 1 < cap) {
+        const int r = esp_http_client_read(_Up.cli, out + n, (int)(cap - 1 - n));
+        if (r <= 0) break;
+        n += (uint32_t)r;
+    }
+    out[n] = 0;
+    return 0;
+}
+static uint32_t up_now(void *u) { (void)u; return now_ms(); }
+static int up_stop(void *u) { (void)u; return _Up.stop; }
+static const cf_sup_hooks_t _UpHooks = { NULL, up_read, up_open, up_write, up_answer, up_close, up_now, up_stop };
+/* the nw HTTP task: one step of the upload; 1 = call again soon */
+static int up_work(void)
+{
+    if (!_Up.on) return 0;
+    if (!_Up.s) { _Up.on = 0; return 0; }
+    const int more = cf_sup_step(_Up.s);
+    if (!more) { up_close(NULL); _Up.on = 0; _Up.done = 1; }
+    return more;
+}
+static int up_wifi_saved(void)
+{
+    char ssid[36];
+    CWL_GetSsidText(ssid, sizeof ssid);
+    return ssid[0] != 0;
+}
+static int gj_save_to_cloud(uint32_t uid, char *res, size_t n)
+{
+    int out = 0, held = 0;
+    cf_sup_t *s = NULL;
+    const uint32_t fh = esp_get_free_heap_size(), t0 = now_ms();
+    out = cf_sup_gate(NW_Paired(), up_wifi_saved(), CfRc_Playing(), 1);
+    if (!out && (!jobs_idle() || CfRc_LibBusy() || _Up.on)) out = CF_SUP_E_BUSY;
+    /* the game's entry and its newest save record, as stored (a copy: nothing here writes the library) */
+    if (!out && CfRc_LibShareOpen(uid, &_Up.e, &_Up.sv)) out = CF_SUP_E_BUSY;
+    if (!out && (!_Up.e.save_size || !_Up.sv.seq || _Up.sv.size != _Up.e.save_size)) out = CF_SUP_E_NOSAVE;
+    if (!out && !(s = malloc(sizeof *s))) out = CF_SUP_E_MEM;
+    if (!out) {
+        Sd_JobSetStep("SENDING  THE  SAVE");
+        (void)CfRc_LibNetClose();                          /* its ~5.5 KB are the handshake's */
+        if (!_CiHoldOn) { ci_hold(NULL, 1); held = 1; }        /* the link stops (receive mode's own hold), session or not: the hold is what lets the online task's memory go */
+        for (int t = 0; t < 120 && !CWL_RecvHeld(); t++) vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(1500));                       /* (its kept connection goes on its next turn) */
+        NW_CfCloseGateway();
+        up_footer();
+        cf_sup_begin(s, &_UpHooks, _Up.e.rom_crc32, _Up.e.rom_size, _Up.sv.size + _UpFtN, _UpFtN ? cf_crc32(_Up.sv.crc, _UpFt, _UpFtN) : _Up.sv.crc, _Up.e.title);
+        _Up.done = 0; _Up.stop = 0; _Up.next_open = 0; _Up.heap_waits = 0; _Up.opens = 0;
+        _Up.s = s;
+        _Up.on = 1;
+        while (!_Up.done) {
+            gj_sub(s->pct);
+            gj_keep();
+            if (!_Up.stop && now_ms() - t0 > 120000u) _Up.stop = 1;       /* (the step ends it at its next turn) */
+            if (_Up.stop && now_ms() - t0 > 150000u) break;               /* (the HTTP task never came back: see below) */
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (_Up.done) out = s->res;
+        else out = CF_SUP_E_STOP;
+        printf("cf: save to my games: %lu bytes, outcome %d (http %d) in %lu ms; opens %lu, heap free %lu at the start, %lu now, lowest %lu\n",
+               (unsigned long)(_Up.sv.size + _UpFtN), out, s->http, (unsigned long)(now_ms() - t0), (unsigned long)_Up.opens, (unsigned long)fh,
+               (unsigned long)esp_get_free_heap_size(), (unsigned long)esp_get_minimum_free_heap_size());
+        if (_Up.done) { _Up.s = NULL; free(s); }                          /* (if the task did not come back it still owns it: left, not freed) */
+        else { _Up.stop = 1; printf("cf: save to my games: the HTTP task did not end the upload in time (left)\n"); }
+        /* every way out: the link comes back, the page's library opens again */
+        if (held) ci_hold(NULL, 0);
+        if (CfRc_LibHeld()) CfRc_LibHold(1);
+    }
+    snprintf(res, n, "%s", cf_sup_words(out));
+    if (out) printf("cf: save to my games: not saved (%d)\n", out);
+    return out == CF_SUP_OK || out == CF_SUP_ALREADY ? 0 : -1;
+}
 static int gj_to_cart(int from_lib, const char *path, uint32_t uid, int flags, char *res, size_t n)
 {
     static const char no[] = "NOT  WRITTEN";
@@ -4923,6 +5116,7 @@ static int card_job(int kind, const char *path, uint32_t uid, int flags, const c
     case kSdJob_CardToLib:  e = path ? gj_card_to_lib(path, title, res, n) : -1; break;
     case kSdJob_CartToLib:  e = gj_cart_to_lib(res, n); break;
     case kSdJob_LibToCard:  e = gj_lib_to_card(uid, res, n); break;
+    case kSdJob_SaveToCloud: e = gj_save_to_cloud(uid, res, n); break;
     default:                e = -1; snprintf(res, n, "NOT  DONE|"); break;
     }
     if (e && !res[0]) snprintf(res, n, "NOT  DONE|TRY  AGAIN");

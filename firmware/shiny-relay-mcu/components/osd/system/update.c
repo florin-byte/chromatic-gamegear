@@ -15,11 +15,11 @@
 // (NW_FwView) and takes its buttons (NW_FwButton); this file only draws (as SYSTEM > DOWNLOAD).
 // Same layout as SYSTEM > NETWORK's rows (x 77, y 46, 9 px a row, seven rows).
 enum {
-    kTextLen = 24,
+    kTextLen = kUpdateTextLen,
     kX_px = 77,
     kY_px = 46,
     kRow_px = 9,
-    kRows = 7,
+    kRows = kUpdateRows,
 };
 
 // No text cache of its own (static RAM is short: the TLS gate): the label's own text is compared.
@@ -59,82 +59,82 @@ static void Rows(lv_obj_t *pScreen, const char *const R[kRows], const bool W[kRo
     for (int i = 0; i < kRows; i++) Line(pScreen, i, W[i], R[i] ? R[i] : "");
 }
 
+// The rows of a flow the update machine shows (a check, a download, READY, a result...), for SYSTEM > UPDATE and
+// SYSTEM > CUSTOM alike (1.1.12: one machine, two pages; v->Custom says a custom build is what it is about).
+// false: the machine is idle (kNwFv_Menu): the page draws its own menu. S: the caller's text space.
+bool Update_FlowRows(const NwFwView_t *v, char S[4][kUpdateTextLen + 16], const char *R[kUpdateRows], bool W[kUpdateRows])
+{
+    char *const b = S[0], *const r1 = S[1], *const r2 = S[2];
+    for (int i = 0; i < kUpdateRows; i++) { R[i] = ""; W[i] = false; }
+    {
+        const char *bar = strchr(v->Note, '|');
+        snprintf(r1, kUpdateTextLen, "%.*s", bar ? (int)(bar - v->Note) : (int)strlen(v->Note), v->Note);
+        snprintf(r2, kUpdateTextLen, "%s", bar ? bar + 1 : "");
+    }
+    b[0] = 0;
+    switch (v->Kind)
+    {
+    case kNwFv_Busy:
+        R[0] = v->Title; R[2] = "THE  LINK  PAUSES"; R[3] = "UNTIL  IT  IS  DONE"; R[6] = "B:  CANCEL";
+        W[0] = W[6] = true;
+        return true;
+    case kNwFv_Offer:
+        R[0] = "BUILD  WAITING"; R[1] = v->Name[0] ? v->Name : "CUSTOM  BUILD"; R[2] = v->Version;
+        R[3] = "NOT  AN  OFFICIAL"; R[4] = "RELEASE"; R[5] = "A:  DOWNLOAD"; R[6] = "B:  BACK";
+        W[0] = W[1] = W[5] = W[6] = true;
+        return true;
+    case kNwFv_Download:
+        snprintf(b, kUpdateTextLen, "%d%%", v->Pct);
+        R[0] = "DOWNLOADING"; R[1] = v->Version; R[2] = b; R[3] = "KEEP  IT  ON  AND"; R[4] = "NEAR  WI-FI"; R[6] = "B:  CANCEL";
+        W[0] = W[2] = W[6] = true;
+        return true;
+    case kNwFv_Ready:
+        R[0] = v->Custom ? "BUILD  READY" : "UPDATE  READY"; R[1] = v->Version; R[2] = "IT  RESTARTS  THE"; R[3] = "CHROMATIC";
+        R[5] = "A:  INSTALL"; R[6] = "B:  LATER";
+        W[0] = W[1] = W[5] = W[6] = true;
+        return true;
+    case kNwFv_Switch:
+        R[0] = "INSTALLING"; R[1] = "RESTARTING";
+        W[0] = true;
+        return true;
+    case kNwFv_Fpga:
+        if (v->Pct >= 0) snprintf(b, kUpdateTextLen, "%d%%", v->Pct);
+        R[0] = v->Title; R[2] = r1; R[3] = r2; R[5] = b;
+        W[0] = W[5] = true;
+        return true;
+    case kNwFv_Result:
+        R[0] = v->Title; R[1] = r1; R[2] = r2; R[3] = v->Version; R[5] = "A:  OK";
+        W[0] = W[5] = true;
+        return true;
+    default:
+        return false;
+    }
+}
+
 OSD_Result_t Update_Draw(void *arg)
 {
     if (arg == NULL) return kOSD_Result_Err_NullDataPtr;
     lv_obj_t *const pScreen = (lv_obj_t *const)arg;
     NwFwView_t v;
     NW_FwView(&v);
-    char a[kTextLen + 16], b[kTextLen + 16], r1[kTextLen] = "", r2[kTextLen] = "";
-    {
-        const char *bar = strchr(v.Note, '|');
-        snprintf(r1, sizeof r1, "%.*s", bar ? (int)(bar - v.Note) : (int)strlen(v.Note), v.Note);
-        snprintf(r2, sizeof r2, "%s", bar ? bar + 1 : "");
-    }
+    char S[4][kUpdateTextLen + 16];
+    const char *R[kRows];
+    bool W[kRows];
+    if (Update_FlowRows(&v, S, R, W)) { Rows(pScreen, R, W); return kOSD_Result_Ok; }
+    char a[kTextLen + 16], b[kTextLen + 16];
     snprintf(a, sizeof a, "VERSION  %s", v.Running);
-    switch (v.Kind)
+    // (1.1.12: a custom build waiting in the slot is SYSTEM > CUSTOM's, not shown here)
+    if (v.ReadyWaits && !v.Custom)
     {
-    case kNwFv_Busy:
-    {
-        const char *R[kRows] = { v.Title, "", "THE  LINK  PAUSES", "UNTIL  IT  IS  DONE", "", "", "B:  CANCEL" };
-        const bool W[kRows] = { true, false, false, false, false, false, true };
-        Rows(pScreen, R, W);
-        break;
+        snprintf(b, sizeof b, "%s  WAITS", v.Version);
+        const char *R2[kRows] = { "SHINY  RELAY", a, "AN  UPDATE", b, "", "A:  SEE  IT", "" };
+        const bool W2[kRows] = { true, false, false, false, false, true, false };
+        Rows(pScreen, R2, W2);
+        return kOSD_Result_Ok;
     }
-    case kNwFv_Download:
-    {
-        snprintf(b, sizeof b, "%d%%", v.Pct);
-        const char *R[kRows] = { "DOWNLOADING", v.Version, b, "KEEP  IT  ON  AND", "NEAR  WI-FI", "", "B:  CANCEL" };
-        const bool W[kRows] = { true, false, true, false, false, false, true };
-        Rows(pScreen, R, W);
-        break;
-    }
-    case kNwFv_Ready:
-    {
-        const char *R[kRows] = { "UPDATE  READY", v.Version, "IT  RESTARTS  THE", "CHROMATIC", "", "A:  INSTALL", "B:  LATER" };
-        const bool W[kRows] = { true, true, false, false, false, true, true };
-        Rows(pScreen, R, W);
-        break;
-    }
-    case kNwFv_Switch:
-    {
-        const char *R[kRows] = { "INSTALLING", "RESTARTING", "", "", "", "", "" };
-        const bool W[kRows] = { true, false, false, false, false, false, false };
-        Rows(pScreen, R, W);
-        break;
-    }
-    case kNwFv_Fpga:
-    {
-        if (v.Pct >= 0) snprintf(b, sizeof b, "%d%%", v.Pct); else b[0] = 0;
-        const char *R[kRows] = { v.Title, "", r1, r2, "", b, "" };
-        const bool W[kRows] = { true, false, false, false, false, true, false };
-        Rows(pScreen, R, W);
-        break;
-    }
-    case kNwFv_Result:
-    {
-        const char *R[kRows] = { v.Title, r1, r2, v.Version[0] ? v.Version : "", "", "A:  OK", "" };
-        const bool W[kRows] = { true, false, false, false, false, true, false };
-        Rows(pScreen, R, W);
-        break;
-    }
-    case kNwFv_Menu:
-    default:
-    {
-        if (v.ReadyWaits)
-        {
-            snprintf(b, sizeof b, "%s  WAITS", v.Version);
-            const char *R[kRows] = { "SHINY  RELAY", a, "AN  UPDATE", b, "", "A:  SEE  IT", "" };
-            const bool W[kRows] = { true, false, false, false, false, true, false };
-            Rows(pScreen, R, W);
-            break;
-        }
-        const char *R[kRows] = { "SHINY  RELAY", a, "UPDATE  OVER  WI-FI", "", "", "A:  CHECK  FOR", "UPDATE" };
-        const bool W[kRows] = { true, false, false, false, false, true, true };
-        Rows(pScreen, R, W);
-        break;
-    }
-    }
+    const char *R2[kRows] = { "SHINY  RELAY", a, "OFFICIAL  UPDATES", "OVER  WI-FI", "", "A:  CHECK  FOR", "UPDATE" };
+    const bool W2[kRows] = { true, false, false, false, false, true, true };
+    Rows(pScreen, R2, W2);
     return kOSD_Result_Ok;
 }
 

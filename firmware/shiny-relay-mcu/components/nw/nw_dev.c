@@ -17,6 +17,7 @@ void CfDev_XsStatus(const uint8_t *p, uint8_t n);
 #include <fcntl.h>
 
 #include "cwl.h"
+#include "cwl_time.h"
 #include "cwl_online.h"
 #include "cwl_net.h"
 #include "cwl_sec.h"
@@ -565,7 +566,9 @@ static int8_t _HdrNotify = -1;   // -1: the answer said nothing
 static esp_err_t OnHttpEvent(esp_http_client_event_t *ev)
 {
     if (ev->event_id != HTTP_EVENT_ON_HEADER || ev->header_key == NULL || ev->header_value == NULL) return ESP_OK;
-    if (strcasecmp(ev->header_key, "X-Total-Length") == 0) {
+    if (strcasecmp(ev->header_key, "Date") == 0) {
+        (void)CwlTime_FromHttpDate(ev->header_value);   // 1.1.7: the real time from our server when nothing set the clock yet
+    } else if (strcasecmp(ev->header_key, "X-Total-Length") == 0) {
         _HdrTotal = (uint32_t)strtoul(ev->header_value, NULL, 10);
         _HdrHaveTotal = true;
     } else if (strcasecmp(ev->header_key, "Content-Range") == 0 && !_HdrHaveTotal) {
@@ -1188,6 +1191,7 @@ void NW_CartView(NwCartView_t *Out) { memset(Out, 0, sizeof *Out); Out->Kind = -
 void NW_CartButton(int A) { (void)A; }
 void NW_FwView(NwFwView_t *Out) { memset(Out, 0, sizeof *Out); Out->Kind = -1; }
 void NW_FwButton(int A) { (void)A; }
+void NW_FwCustom(void) { }
 void NW_PlayView(NwPlayView_t *Out) { memset(Out, 0, sizeof *Out); Out->Kind = -1; }
 void NW_PlayButton(int A) { (void)A; }
 void NW_PlaySd(const char *Path) { (void)Path; }
@@ -1208,6 +1212,9 @@ int  NW_GgSideDone(int *Code) { *Code = -1; return -1; }
 int  NW_GgReady(void) { return 0; }
 int  NW_GgActive(void) { return 0; }
 int  NW_Paired(void) { return 0; }
+int  NW_SaveCloudReady(void) { return 0; }
+int  NW_SaveCloudHas(uint32_t Uid) { (void)Uid; return 0; }
+void NW_SaveCloudForget(void) { }
 #endif
 static volatile int _GgOwnsJob;
 void NW_GgOwnJob(int On) { _GgOwnsJob = On ? 1 : 0; }
@@ -1224,6 +1231,8 @@ void CfDev_FwView(NwFwView_t *Out);
 void CfDev_FwButton(int A);
 void NW_FwView(NwFwView_t *Out) { CfDev_FwView(Out); }
 void NW_FwButton(int A) { CfDev_FwButton(A); }
+void CfDev_FwCustom(void);
+void NW_FwCustom(void) { CfDev_FwCustom(); }
 void CfRc_View(NwPlayView_t *Out);
 void CfRc_Button(int A);
 void NW_PlayView(NwPlayView_t *Out) { CfRc_View(Out); }
@@ -1262,6 +1271,15 @@ int  NW_GgSideDone(int *Code) { return CfDev_GgSideDone(Code); }
 int  NW_GgReady(void) { return CfDev_GgReady(); }
 int  NW_GgActive(void) { return CfDev_GgActive(); }
 int  NW_Paired(void) { return CwlOnline_Paired() ? 1 : 0; }
+// lane savecloud1: SAVE TO MY GAMES is offered when this unit is paired and has a Wi-Fi network saved
+int  NW_SaveCloudReady(void)
+{
+    char ssid[36];
+    CWL_GetSsidText(ssid, sizeof ssid);
+    return CwlOnline_Paired() && ssid[0] ? 1 : 0;
+}
+int  NW_SaveCloudHas(uint32_t Uid) { return CfRc_LibSaveKnown(Uid); }
+void NW_SaveCloudForget(void) { CfRc_LibSaveForget(); }
 // The streamed cart install takes the memory of the game traffic's idle connection (cf_dev.c net_start).
 void NW_CfCloseGateway(void)
 {

@@ -13,9 +13,13 @@ test:
 	python3 -I check_lines.py $(FONT) ../network.c
 	python3 -I check_lines.py $(FONT) ../download.c ../../../nw/cartflash/cf_install.c
 	python3 -I check_lines.py $(FONT) ../play.c ../../../nw/cartflash/cf_rc_dev.c
-	python3 -I check_words.py $(FONT) ../games.c ../play.c ../getgames.c ../../../nw/cartflash/cf_dev.c ../../../nw/cartflash/cf_rc_dev.c
+	python3 -I check_words.py $(FONT) ../games.c ../play.c ../getgames.c ../../../nw/cartflash/cf_dev.c ../../../nw/cartflash/cf_rc_dev.c ../../../nw/cartflash/cf_sup.c
 	$(MAKE) -s games_shots && ./games_shots > /dev/null
 	$(MAKE) -s gg_shots && ./gg_shots > /dev/null
+	$(MAKE) -s clock_shots && ./clock_shots > /dev/null
+	python3 -I check_words.py $(FONT) ../timeset.c
+	$(MAKE) -s custom_shots && ./custom_shots > custom_rows.txt && python3 -I share_fit.py $(FONT) < custom_rows.txt
+	$(MAKE) -s fw_shots && ./fw_shots > fw_rows.txt && python3 -I fw_fit.py $(FONT) < fw_rows.txt
 
 shots:
 	mkdir -p $(OUT)
@@ -40,8 +44,8 @@ dl-shots: dl_shots
 
 # SYSTEM > GAMES (lane ui110dev): the real page over mock places, every screen as a PNG, its rules checked
 GOUT ?= shots_games
-games_shots: games_shots.c ../games.c ../play.c ../games.h ../play.h games_share_stub.c ../share.h
-	$(CC) -O1 -g -Wall -Wextra -std=gnu11 -DGAMES_HOST -Igstub -I../../../nw -I../../../sdcard -I.. -o $@ games_shots.c ../games.c ../play.c games_share_stub.c
+games_shots: games_shots.c ../games.c ../play.c ../games.h ../play.h games_share_stub.c ../share.h ../../../nw/cartflash/cf_sup.c ../../../nw/cartflash/cf_sup.h
+	$(CC) -O1 -g -Wall -Wextra -std=gnu11 -DGAMES_HOST -Igstub -I../../../nw -I../../../nw/cartflash -I../../../sdcard -I.. -o $@ games_shots.c ../games.c ../play.c games_share_stub.c ../../../nw/cartflash/cf_sup.c
 games-shots: games_shots
 	mkdir -p $(GOUT)
 	./games_shots | while IFS='|' read -r n t r0 r1 r2 r3 r4 r5 r6; do \
@@ -76,3 +80,36 @@ share_page_test: share_page_test.c ../share.c ../share.h ../../../nw/cartflash/c
 share-page: share_page_test
 	./share_page_test
 .PHONY: share-page
+
+# SYSTEM > CLOCK (1.1.7): the real page over a scripted clock, every screen as a PNG, its rules checked
+COUT ?= shots_clock
+clock_shots: clock_shots.c ../timeset.c ../timeset.h ../../../cwl/cwl_civil.h
+	$(CC) -O1 -g -Wall -Wextra -std=gnu11 -Igstub -I../../../cwl -I.. -o $@ clock_shots.c ../timeset.c
+clock-shots: clock_shots
+	mkdir -p $(COUT)
+	./clock_shots | while IFS='|' read -r n t r0 r1 r2 r3 r4 r5 r6; do \
+	    python3 -I osd_page.py $(FONT) $(COUT)/$$n.png "$$t" "$$r0" "$$r1" "$$r2" "$$r3" "$$r4" "$$r5" "$$r6" | sed "s|^|$$n: |" | grep -v ' OK ' ; done; true
+.PHONY: clock-shots
+
+# SYSTEM > CUSTOM and SYSTEM > UPDATE (1.1.12): the real pages over the real update machine (cf_ota.c, both channels) with a
+# scripted server and pairing: the rules checked (UPDATE official only, CUSTOM custom only), every row fits, every screen a PNG
+CUOUT ?= shots_custom
+custom_shots: custom_shots.c ../custom.c ../custom.h ../update.c ../update.h ../../../nw/cartflash/cf_ota.c ../../../nw/cartflash/cf_ota.h stub/cwl_online.h
+	$(CC) -O1 -g -Wall -Wextra -std=gnu11 -Istub -I.. -I../../../nw -I../../../nw/cartflash -o $@ custom_shots.c ../custom.c ../update.c ../../../nw/cartflash/cf_ota.c
+custom-shots: custom_shots
+	mkdir -p $(CUOUT)
+	./custom_shots | while IFS='|' read -r n r0 r1 r2 r3 r4 r5 r6; do \
+	    python3 -I $(SHOT) $(FONT) $(BG) $(CUOUT)/$$n.png "$$r0" "$$r1" "$$r2" "$$r3" "$$r4" "$$r5" "$$r6" > /dev/null || exit 1; echo $(CUOUT)/$$n.png; done
+.PHONY: custom-shots
+
+# SYSTEM INFO (status/fw.c, 1.1.12): the real page with the longest release and custom versions; every character of
+# every label is drawn (not cut by the details box, inside the panel, off the picture). fw-shots: every page a PNG
+FW_C ?= ../../status/fw.c
+FWOUT ?= shots_fw
+FWBG ?= $(BG)
+fw_shots: fw_shots.c $(FW_C) ../../status/fw.h fwstub/lvgl.h fwstub/osd_shared.h
+	$(CC) -O1 -g -Wall -Wextra -std=gnu11 -DFW_HOST_TEST -Ifwstub -I../../status -o $@ fw_shots.c $(FW_C)
+fw-shots: fw_shots
+	mkdir -p $(FWOUT)
+	./fw_shots > fw_rows.txt; python3 -I fw_fit.py $(FONT) ../../../images/img_chromatic.c $(FWBG) $(FWOUT) < fw_rows.txt
+.PHONY: fw-shots

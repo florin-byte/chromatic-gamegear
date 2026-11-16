@@ -1,0 +1,144 @@
+diff -ruN a/CHANGELOG.md b/CHANGELOG.md
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,3 +1,24 @@
++## v18.33 (warm whites, lane warm1)
++
++The color temperature setting (NEUTRAL, WARM 1..5) now also warms Game Boy (DMG) games. Built with place option 1,
++route option 2 (build w1833b: 0 setup / 0 hold violations; logic 96%, CLS 99%, BSRAM 55 of 56; .bin 774,116 bytes,
++.fs sha256 4600ac260694724034146dcdc395bc391e22fc5b0a3b1a2bff712b7a95a4f0ba). place 2 route 2 (w1833a) left 19 setup
++violations on this tree, so 18.32's own settings do not close it. Like every Shiny Relay image it is a custom build
++(the version's debug bit is set).
++
++### Changed
++- video.v: the warm shift (bright pixels only: red up, green half, blue down, the same levels) was applied only when the
++  core ran in Game Boy Color mode (apply_color_temp = isGBC_mode). It now applies to every pixel. A Game Boy game's
++  colors (the built-in palettes, custom palettes from the ESP32, the boot ROM's colorization) all end in lcd_rgb_raw, so
++  one stage covers every palette. The rule "only bright colors move, dark ones are unchanged" is the old one: a pixel with
++  fewer than two bright channels (bit 4 clear in two or more) is never moved, level 0 (NEUTRAL) adds and subtracts 0.
++  Removing the enable mux costs no logic; the build costs +143 LUT/ALU and no registers (placement noise).
++- system_monitor.sv: unchanged except the version. The level command (0xE) was already taken in every mode; the
++  hardware hotkey keeps its meaning (GB mode: palette, GBC mode: color temperature), the level is set from the menu.
++- Sim: esp32t/sim_cwl/tb_warm.v + run_tb_warm.sh run the stage of this video.v against the 18.32 video.v over all
++  32,768 pixels x levels 0..7 x both modes: a GBC game identical to 18.32, NEUTRAL identical to the raw pixel, darks
++  unmoved, red never falls and blue never rises, monotonic in the level (524,288 cases, PASS).
++
+ ## v18.31 (Shiny Relay 1.1.0, lane fpgacomp1)
+ 
+ The FPGA image of Shiny Relay 1.1.0 in the boot flash layout "rf" (headers, a recovery design, one full design, the
+diff -ruN a/esp32t/sim_cwl/run_tb_warm.sh b/esp32t/sim_cwl/run_tb_warm.sh
+--- a/esp32t/sim_cwl/run_tb_warm.sh
++++ b/esp32t/sim_cwl/run_tb_warm.sh
+@@ -0,0 +1,19 @@
++#!/bin/sh
++# run_tb_warm.sh [old-video.v]: build tb_warm.v around the color temperature stage of this tree's video.v and of the
++# 18.32 video.v (git show HEAD:... of the commit before the warm whites change), run it with iverilog
++set -e
++cd "$(dirname "$0")"
++V=../src/rtl/EMU/CORE/video.v
++OLDREF=${1:-8cb9966}
++T=${TMPDIR:-/tmp}/tb_warm_$$; mkdir -p $T
++ext() { # file -> the stage (functions + wires up to lcd_rgb_temp)
++  sed -n '/^function \[4:0\] sat_add5/,/^wire \[14:0\] lcd_rgb_temp/p' "$1"
++}
++mk() { # name file
++  { echo "module $1(input [14:0] lcd_rgb_raw, input [2:0] gbc_color_temp, input isGBC_mode, output [14:0] out_px);"; ext "$2"; echo "assign out_px = lcd_rgb_temp;"; echo endmodule; } > $T/$1.v
++}
++mk warm_new $V
++git show "$OLDREF:esp32t/src/rtl/EMU/CORE/video.v" > $T/old_video.v
++mk warm_old $T/old_video.v
++iverilog -g2012 -o $T/tb_warm.vvp tb_warm.v $T/warm_new.v $T/warm_old.v
++vvp $T/tb_warm.vvp
+diff -ruN a/esp32t/sim_cwl/tb_warm.v b/esp32t/sim_cwl/tb_warm.v
+--- a/esp32t/sim_cwl/tb_warm.v
++++ b/esp32t/sim_cwl/tb_warm.v
+@@ -0,0 +1,55 @@
++// tb_warm.v (18.33, warm whites): the color temperature stage of video.v, extracted from the real file by run_tb_warm.sh
++//   warm_new = this tree's video.v (the shift on every game), warm_old = the 18.32 video.v (the shift on GBC games only)
++// Checks over ALL 32768 pixels x levels 0..7 (6 and 7 clamp to 5) x isGBC_mode 0/1:
++//   GBC game: new == old (a Game Boy Color game is unchanged);  level 0: new == raw pixel (NEUTRAL = 18.32 on a DMG game);
++//   DMG game, level > 0: old == raw (18.32 never warmed it), new warms exactly the pixels with 2+ bright channels
++//   (a dark pixel, bit 4 clear in two or more channels, is untouched), red never falls, blue never rises, and
++//   the shift is monotonic in the level.
++`timescale 1ns/1ps
++module tb_warm;
++    reg  [14:0] raw;
++    reg  [2:0]  lvl;
++    reg         gbcm;
++    wire [14:0] n, o;
++    warm_new u_n(.lcd_rgb_raw(raw), .gbc_color_temp(lvl), .isGBC_mode(gbcm), .out_px(n));
++    warm_old u_o(.lcd_rgb_raw(raw), .gbc_color_temp(lvl), .isGBC_mode(gbcm), .out_px(o));
++    integer p, l, g, bad, cnt, warmed, dark_bad, mono_bad;
++    reg [14:0] prev;
++    function [2:0] lv; input [2:0] x; lv = x > 5 ? 5 : x; endfunction
++    initial begin
++        bad = 0; cnt = 0; warmed = 0; dark_bad = 0; mono_bad = 0;
++        for (g = 0; g < 2; g = g + 1)
++          for (p = 0; p < 32768; p = p + 1) begin
++            prev = p;
++            for (l = 0; l < 8; l = l + 1) begin
++                raw = p; lvl = l; gbcm = g; #1;
++                cnt = cnt + 1;
++                if (g == 1 && n !== o) begin bad = bad + 1; if (bad < 10) $display("GBC MISMATCH px %h lvl %0d new %h old %h", raw, l, n, o); end
++                if (g == 0 && o !== raw) begin bad = bad + 1; if (bad < 10) $display("OLD DMG NOT RAW px %h lvl %0d", raw, l); end
++                if (l == 0 && n !== raw) begin bad = bad + 1; if (bad < 10) $display("NEUTRAL CHANGED px %h new %h", raw, n); end
++                if (g == 0 && l > 0) begin
++                    if (((raw[4] + raw[9] + raw[14]) < 2) && n !== raw) begin dark_bad = dark_bad + 1; if (dark_bad < 10) $display("DARK MOVED px %h lvl %0d new %h", raw, l, n); end
++                    if (n[4:0] < raw[4:0] || n[14:10] > raw[14:10]) begin bad = bad + 1; if (bad < 10) $display("WRONG DIRECTION px %h new %h", raw, n); end
++                    if (n !== raw) warmed = warmed + 1;
++                end
++                if (g == 0 && l >= 1 && l <= 5) begin
++                    // monotonic: red up, blue down as the level rises
++                    if (l > 1 && (n[4:0] < prev[4:0] || n[14:10] > prev[14:10])) mono_bad = mono_bad + 1;
++                    prev = n;
++                end
++            end
++          end
++        // the lightest shades of three typical palettes at every level (for the log)
++        gbcm = 0;
++        for (l = 0; l < 6; l = l + 1) begin
++            lvl = l;
++            raw = 15'h7FFF; #1; $write("white 7FFF lvl %0d -> %h ", l, n);
++            raw = {5'd1, 5'd23, 5'd19}; #1; $write("| green-lightest -> %h ", n);   // 9BBC0F-like (b,g,r)
++            raw = {5'd6, 5'd13, 5'd19}; #1; $write("| light-mid -> %h ", n);
++            raw = {5'd2, 5'd2, 5'd2}; #1; $display("| dark -> %h", n);
++        end
++        $display("checked %0d cases: bad %0d dark_moved %0d mono_bad %0d, DMG pixels warmed %0d", cnt, bad, dark_bad, mono_bad, warmed);
++        if (bad == 0 && dark_bad == 0 && mono_bad == 0 && warmed > 0) $display("TB_WARM PASS"); else $display("TB_WARM FAIL");
++        $finish;
++    end
++endmodule
+diff -ruN a/esp32t/src/rtl/BSP/system_monitor.sv b/esp32t/src/rtl/BSP/system_monitor.sv
+--- a/esp32t/src/rtl/BSP/system_monitor.sv
++++ b/esp32t/src/rtl/BSP/system_monitor.sv
+@@ -516,7 +516,7 @@
+     reg [13:0] version = {
+         1'd0,  // 1 bit reserved
+         1'd1,  // 1 bit debug: set for the CWL2 Wi-Fi link build (not an official release)
+-        6'd32, // 6 bits minor version (32: Shiny Relay 1.1.5: a game played from PSRAM no longer shakes the panel (ST7785_panel_master: a row ends with its 160th pixel, the scanout waits for a row the core has not finished, the panel's frame holds for the core's next frame); bench counters on RDBG op 35; 31: fpgacomp1: the boot flash layout of headers + recovery design + one full design + games (cart_xs guards, FREAD), compressed; 30: Shiny Relay 1.1.0: the FPGA writes its own boot flash (cart_xs F ops, jump headers), the RAM cart (ramcart.v: a game in PSRAM plays with no cartridge), QSPI window reads; 28: 26 + an open port no longer resets the ESP32 (DTR+RTS); was 27: the bridge followed esptool's CHANGE_BAUDRATE on its ESP32 side (115200/460800/921600/1500000/2000000), back to the host's line coding on any DTR/RTS change; the ring read-port fairness (7bea24c) reverted; 26: 25 + the express cart stream (cartspeed1): QSPI writes with address bit 31 go to a 4 KiB cart ring, not PSRAM; UART address 0x12 ops/posts, status channel 12 = address 0x0C; engine bus timing settable per session; 25: 18.21 + cart flash for Wi-Fi install (wifiinst1): link cmd 9 ENGINE_ALLOW = the cart bus engine at FF60-FF67, cmd 10 BOOT_SELECT = the alternate netboot boot image; NO 18.22 overlay, NO 18.23 slave lock / power-on hold (7 and 8 stay unused); 21: network window FF58-FF5F, channel 11 = address 0x0B, RX address 0x11; 15: CONFIG bit 1, wake preamble while the ESP32 may sleep; 16: write barrier, CONFIG bit 2; 17: 16-deep link event queue; 18: cmd 5 cartridge power cycle; 19: SC=0x01 under a held master absorbed; 20: standing offers, CONFIG bit 3, cmd 6)
++        6'd33, // 6 bits minor version (33: warm whites: the color temperature level (WARM 1..5) also warms Game Boy (DMG) games, every palette; 32: Shiny Relay 1.1.5: a game played from PSRAM no longer shakes the panel (ST7785_panel_master: a row ends with its 160th pixel, the scanout waits for a row the core has not finished, the panel's frame holds for the core's next frame); bench counters on RDBG op 35; 31: fpgacomp1: the boot flash layout of headers + recovery design + one full design + games (cart_xs guards, FREAD), compressed; 30: Shiny Relay 1.1.0: the FPGA writes its own boot flash (cart_xs F ops, jump headers), the RAM cart (ramcart.v: a game in PSRAM plays with no cartridge), QSPI window reads; 28: 26 + an open port no longer resets the ESP32 (DTR+RTS); was 27: the bridge followed esptool's CHANGE_BAUDRATE on its ESP32 side (115200/460800/921600/1500000/2000000), back to the host's line coding on any DTR/RTS change; the ring read-port fairness (7bea24c) reverted; 26: 25 + the express cart stream (cartspeed1): QSPI writes with address bit 31 go to a 4 KiB cart ring, not PSRAM; UART address 0x12 ops/posts, status channel 12 = address 0x0C; engine bus timing settable per session; 25: 18.21 + cart flash for Wi-Fi install (wifiinst1): link cmd 9 ENGINE_ALLOW = the cart bus engine at FF60-FF67, cmd 10 BOOT_SELECT = the alternate netboot boot image; NO 18.22 overlay, NO 18.23 slave lock / power-on hold (7 and 8 stay unused); 21: network window FF58-FF5F, channel 11 = address 0x0B, RX address 0x11; 15: CONFIG bit 1, wake preamble while the ESP32 may sleep; 16: write barrier, CONFIG bit 2; 17: 16-deep link event queue; 18: cmd 5 cartridge power cycle; 19: SC=0x01 under a held master absorbed; 20: standing offers, CONFIG bit 3, cmd 6)
+         6'd18  // 6 bits major version
+     };
+ 
+diff -ruN a/esp32t/src/rtl/EMU/CORE/video.v b/esp32t/src/rtl/EMU/CORE/video.v
+--- a/esp32t/src/rtl/EMU/CORE/video.v
++++ b/esp32t/src/rtl/EMU/CORE/video.v
+@@ -1141,7 +1141,8 @@
+ 	end
+ endfunction
+ 
+-wire apply_color_temp = isGBC_mode;
++// 18.33: the warm shift applies to Game Boy (DMG) pixels too (every palette, built-in or custom, ends here in lcd_rgb_raw);
++// level 0 (NEUTRAL) adds and subtracts 0, so its output is the unshifted pixel as before.
+ wire [4:0] rgb_r = lcd_rgb_raw[4:0];
+ wire [4:0] rgb_g = lcd_rgb_raw[9:5];
+ wire [4:0] rgb_b = lcd_rgb_raw[14:10];
+@@ -1163,7 +1164,7 @@
+ wire [4:0] green_temp = sat_add5(rgb_g, green_delta);
+ wire [4:0] blue_temp  = sat_sub5(rgb_b, gated_delta);
+ 
+-wire [14:0] lcd_rgb_temp = apply_color_temp ? {blue_temp, green_temp, red_temp} : lcd_rgb_raw;
++wire [14:0] lcd_rgb_temp = {blue_temp, green_temp, red_temp};
+ 
+ assign lcd_clk = mode3 && ~skip_en && ~sprite_fetch_hold && ~bg_shift_empty && (pcnt >= 8);
+ 

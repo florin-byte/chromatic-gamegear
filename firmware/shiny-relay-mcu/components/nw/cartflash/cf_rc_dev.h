@@ -55,6 +55,7 @@ int      CfRc_Kept(void);
 int      CfRc_Playing(void);
 int      CfRc_Loading(void);
 int      CfRc_KeepAwake(void);          /* fwshrink1: the MCU stays awake (no light sleep) while this is true */            /* fwshrink1: a load under way or asked for (not a game that just plays) */
+uint32_t CfRc_SleepTimerMs(void);       /* lane savefix1: a game plays from RAM: the timer wake (ms) light sleep must carry so the save poll runs; 0 = none */
 void     CfRc_Trim(void);
 int      CfRc_Yield(void);              /* receive mode: a RAM game stops (save kept), its heap comes back */               /* the window buffer back to the heap (receive mode), unless it plays */
 void     CfRc_PlayKept(void);
@@ -151,6 +152,9 @@ void     CfRc_PlayInRamSave(uint32_t size, uint32_t crc, const char *title, int 
 uint32_t CfRc_PlayDone(void);                            /* m110s: counts the plays the task has finished (started or not): a caller waits for it to move */
 int      CfRc_LibShareOpen(uint32_t uid, cf_lib_ent_t *e, cf_lib_save_t *sv);
 int      CfRc_LibShareRead(const cf_lib_ent_t *e, const cf_lib_save_t *sv, int save, uint32_t off, uint8_t *b, uint32_t n);
+int      CfRc_LibSaveKnown(uint32_t uid);                /* lane savecloud1: 1 the kept game has a stored save, 0 none, -1 not known (asked) */
+void     CfRc_LibSaveForget(void);
+int      CfRc_LibNetClose(void);                         /* the library closed for a TLS handshake's heap (CfRc_LibHold(1) opens it again) */
 int      CfRc_LibSavePutFromRam(uint32_t uid);           /* async: CfRc_LibBusy / CfRc_LibResult */
 void     CfRc_SaveComesWith(int on);                     /* lane mygames1: the next keep / play / stream end: the save RAM holds its save */
 uint32_t CfRc_LibRoomNeed(uint32_t stored_size, uint32_t save_size);

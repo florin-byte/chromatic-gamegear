@@ -434,9 +434,17 @@ static void ProcessMessage(const RxMsg_t *const pMsg)
             const bool GBCMode = (bool)((pMsg->PayloadU32 >> 1) & 1);
 
             PwrMgr_SetLPM(InLPM);
+            const bool ModeChanged = (Style_IsGBCMode() != GBCMode);
             Style_SetGBCMode(GBCMode);
 
-            if ((pMsg->Len >= 2) && !OSD_IsVisible())
+            if (ModeChanged)
+            {
+                // A game of the other kind started: send our color temperature level again
+                // (it applies to Game Boy and Game Boy Color games alike) and do not take
+                // this message's level back over it.
+                FPGA_Tx_WriteColorTemp();
+            }
+            else if ((pMsg->Len >= 2) && !OSD_IsVisible())
             {
                 const GBCColorTempLevel_t RuntimeColorTempLevel = (GBCColorTempLevel_t)(pMsg->Payload[1] & 0x7);
                 GBCColorTemp_Update(RuntimeColorTempLevel);

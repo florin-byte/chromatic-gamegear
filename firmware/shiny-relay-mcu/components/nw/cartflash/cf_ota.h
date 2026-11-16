@@ -23,6 +23,17 @@
  * is finished by the next start); with an app, it is installed as soon as it is staged (the app then goes into the
  * same slot) and INSTALL switches the app slot. The FPGA boots at the next power-on. An update that needs a new FPGA
  * on a unit whose boot flash cannot take one ("rffull" / "legacy") is still UPDATE OVER USB.
+ * 1.1.12, SYSTEM > CUSTOM (custom firmware, shiny_gen_3 notes/CUSTOM_FIRMWARE_PLAN_2026_11_09.md): the same machine
+ * has a second channel. UPDATE is the official releases only: its check says "split":1 and an answer that names a
+ * custom version ("-cfw.") is refused here. CUSTOM asks
+ *   POST /link_device/fw/custom {the same body} (TLS, the unit's PAIRING token: the build is its account's choice)
+ *            -> {"update": false} (none chosen) | {"update": false, "running": true} (this unit runs it)
+ *             | {"update": false, "first": true} (the release must go on first: UPDATE)
+ *             | {"update": false, "usb": true, "why": "layout", "version"}
+ *             | {"update": true, "version": "<release>-cfw.<id>", "name", "size", "sha256", "url"}   (an app only)
+ * and shows the build (BUILD WAITING, A: DOWNLOAD) before anything is fetched; an answer that is not a custom version,
+ * or carries an FPGA part, is refused. Download, READY, INSTALL and the rollback are the update's own. One image waits
+ * in the slot at a time: a check on one channel drops a waiting image of the other.
  * Portable C, driven by cf_ota_tick() from the nw task; nothing here blocks. */
 #ifndef CF_OTA_H
 #define CF_OTA_H
@@ -33,23 +44,28 @@
 #define CF_OTA_API_MS    (60u * 1000u)
 #define CF_OTA_HOLD_MS   (6u * 1000u)
 #define CF_OTA_WIFI_MS   (30u * 1000u)
-#define CF_OTA_CONFIRM_MS (20u * 1000u)      /* a new app confirms itself after this long with its FPGA link up */
+#define CF_OTA_CONFIRM_MS (2u * 1000u)      /* a new app confirms itself after this long with its FPGA link up */
+#define CF_OTA_OFFER_MS (120u * 1000u)     /* BUILD WAITING is shown this long (the link is held meanwhile) */
 #define CF_OTA_MIN       0x20000u            /* an app image's size: 128 KiB .. one slot */
 #define CF_OTA_MAX       0x1E0000u
 
-enum { OT_IDLE, OT_HOLD, OT_REG, OT_CHECK, OT_DL, OT_READY, OT_SWITCH, OT_RESULT, OT_NSTATES };
+enum { OT_IDLE, OT_HOLD, OT_REG, OT_CHECK, OT_DL, OT_READY, OT_SWITCH, OT_RESULT, OT_OFFER, OT_NSTATES };
+enum { CF_OTA_OFFICIAL, CF_OTA_CUSTOM };   /* the channel */
 enum { OV_MENU,      /* SHINY RELAY x.y.z, A: CHECK FOR UPDATE (or UPDATE READY when one waits) */
        OV_BUSY,      /* CHECKING / GETTING READY (B: CANCEL) */
        OV_DL,        /* DOWNLOADING x.y.z NN% (B: CANCEL) */
        OV_READY,     /* UPDATE READY x.y.z, A: INSTALL, B: LATER */
        OV_SWITCH,    /* RESTARTING */
-       OV_RESULT };  /* title + two rows (A: OK) */
+       OV_RESULT,    /* title + two rows (A: OK) */
+       OV_OFFER = 7 };  /* CUSTOM: BUILD WAITING name version, A: DOWNLOAD, B: BACK (6 is the page's own FPGA view) */
 typedef struct {
     int      kind;
     char     title[24];
     char     note[40];       /* "ROW1|ROW2" */
     char     version[16];    /* the running one (menu) or the update's */
     int      pct;
+    int      custom;         /* the channel of what is shown (CF_OTA_CUSTOM: a custom build) */
+    char     name[24];       /* the custom build's project name ("" not known) */
 } cf_ota_view_t;
 
 #define CF_OTA_FPGA_MIN  0x40000u            /* an FPGA image: 256 KiB .. the biggest full design (cf_fota.h CF_FOTA_FULL_MAX) */
@@ -63,6 +79,7 @@ typedef struct {
     uint32_t fsize;
     char     fsha256[65];
     char     furl[CF_OTA_URL_MAX + 1];
+    char     name[24];               /* CUSTOM: the project's name as the server wrote it for the screen */
 } cf_ota_offer_t;
 
 typedef struct {
@@ -100,6 +117,7 @@ typedef struct {
     char    *buf;
     volatile int btn;
     int      rx, reg_tries;
+    int      chan;                       /* CF_OTA_OFFICIAL / CF_OTA_CUSTOM: what this run is for */
     cf_ota_offer_t offer;
     int      pct;
     const char *res_title, *res_rows;    /* literals */
@@ -110,6 +128,8 @@ typedef struct {
 void cf_ota_init(cf_ota_t *c, const cf_ota_host_t *h, uint32_t now);
 void cf_ota_tick(cf_ota_t *c, uint32_t now);
 void cf_ota_button(cf_ota_t *c, int a);
+void cf_ota_custom(cf_ota_t *c);                 /* SYSTEM > CUSTOM's A on its menu: check for the custom build */
+int  cf_ota_is_custom(const char *version);      /* 1 = a custom build's version ("-cfw.") */
 void cf_ota_view(const cf_ota_t *c, cf_ota_view_t *v);
 int  cf_ota_busy(const cf_ota_t *c);
 /* what the boot found (cf_dev.c): 1 = this is a new version, confirmed; 2 = the last update did not start

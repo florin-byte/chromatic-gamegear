@@ -21,8 +21,8 @@ idf_component_register(SRCS
                         "system/wifi_link.c"
                         "system/wifi_net.c"
                         "system/wifi_qr.c"
-                        "system/network.c"
-                        "system/download.c" "system/update.c" "system/play.c" "system/games.c" "system/getgames.c" "system/share.c"
+                        "system/network.c" "system/timeset.c"
+                        "system/download.c" "system/update.c" "system/custom.c" "system/play.c" "system/games.c" "system/getgames.c" "system/share.c"
                         "system/play_help.c"
                         "system/online.c"
                     INCLUDE_DIRS

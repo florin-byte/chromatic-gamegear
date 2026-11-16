@@ -82,6 +82,15 @@ TASKS = [
         [("nw_dev.c", "NwTask"), ("cf_dev.c", "CfDev_Tick"), ("cf_install.c", "cf_install_tick"), ("cf_install.c", "rx_fail"), ("cf_install.c", "logf_"), ("cf_dev.c", "ci_log")],
         [("nw_dev.c", "NwTask"), ("cf_dev.c", "CfDev_Tick"), ("cf_install.c", "cf_install_tick"), ("cf_install.c", "rx_begin"), ("cf_install.c", "rx_on?"), ("cf_dev.c", "ci_hold_rx+ci_hold+ci_hold.isra")],
     ]),
+    # lane savecloud1: the nw HTTP task (nw_dev.c HttpTask, kHttpStack 6144) steps SAVE TO MY GAMES's upload next to the stream's GET
+    ("nw_http", 6144, 600, 1024, [
+        # HttpTask -> CfDev_HttpWork (up_work and net_req are inlined into it) -> cf_sup_step -> up_open (the connection; the handshake's own frames are the same as net_req's) -> printf
+        [("nw_dev.c", "HttpTask"), ("cf_dev.c", "CfDev_HttpWork"), ("cf_sup.c", "cf_sup_step"), ("cf_dev.c", "up_open")],
+        # ... -> cf_sup_step -> up_answer / up_read (CfRc_LibShareRead -> CfRc_GameAreaRead)
+        [("nw_dev.c", "HttpTask"), ("cf_dev.c", "CfDev_HttpWork"), ("cf_sup.c", "cf_sup_step"), ("cf_dev.c", "up_answer")],
+        # the precedent that runs on this task today: the stream's GET (TLS gateway route)
+        [("nw_dev.c", "HttpTask"), ("cf_dev.c", "CfDev_HttpWork")],
+    ]),
 ]
 CONSOLE_FUNCS = [("cf_dev.c", "cmd_cart"), ("cf_dev.c", "cmd_cart_usb"), ("cf_usb.c", "cf_usb_cmd"), ("cf_usb.c", "cf_usb_rx"),
                  ("cf_usb.c", "say"), ("cf_usb.c", "arm"), ("cf_dev.c", "usb_line"), ("cf_esp.c", "cf_esp_arm"), ("cf_esp.c", "logf_")]

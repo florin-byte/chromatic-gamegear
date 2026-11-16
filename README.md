@@ -7,7 +7,7 @@ pixel of the game is one pixel of the screen.
 This repository is what came out of it: a Game Gear core for the Chromatic's FPGA, and a firmware that keeps
 it on the console next to the Game Boy core, so you pick which one the console starts with.
 
-It is built on Shiny Relay 1.1.5 (by Shiny Gen, https://shinyrelay.com), which is a modified version of
+It is built on Shiny Relay 1.1.12 (by Shiny Gen, https://shinyrelay.com), which is a modified version of
 ModRetro's open-source FPGA design and ESP32 firmware. The Game Gear core is the MiSTer SMS core, running in
 Game Gear mode. I have nothing to do with ModRetro, Shiny Gen, Sega or Nintendo. `NOTICE.md` says where every
 part comes from and under which licence, `CHANGES.md` says what I changed.
@@ -130,9 +130,9 @@ After anything that uses the Gowin cable the screen stays dark until you turn th
 
 | Path | What |
 |---|---|
-| `firmware/shiny-relay-mcu/` | the ESP32 firmware: Shiny Relay 1.1.5's `mcu/` with the changes of `CHANGES.md` (version 1.1.5-fr3o) |
+| `firmware/shiny-relay-mcu/` | the ESP32 firmware: Shiny Relay 1.1.12's `mcu/` with the changes of `CHANGES.md` (version 1.1.12-fr4a) |
 | `fpga/shiny-relay-1.1.5/` | Shiny Relay 1.1.5's FPGA project, unchanged: the base both designs are built from |
-| `fpga/game-boy-patches/` | two patches on that base for the Game Boy design |
+| `fpga/game-boy-patches/` | three patches on that base for the Game Boy design: Shiny Relay's own step to FPGA 18.33, then my two |
 | `fpga/game-gear/` | the Game Gear design: the files that are new or changed against the base (`overlay/`), its simulation, notes |
 | `tools/` | `gg2gb.py`, `chromatic_flash_image.py`, the installer, console helpers |
 

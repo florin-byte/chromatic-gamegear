@@ -377,7 +377,8 @@ static const HKEntry_t* HotKeys_GetEntry(HKID_t eID)
 {
     if (eID == kHKID_ColorTemp)
     {
-        // Match palette tab context: GB mode => palette control, GBC mode => color temp control.
+        // Hotkey slot: GB mode => palette control (kept), GBC mode => color temp control.
+        // The color temp setting itself is in the menu in both modes.
         return Style_IsGBCMode() ? &gColorTempHotKeyEntry : &gPaletteHotKeyEntry;
     }
 

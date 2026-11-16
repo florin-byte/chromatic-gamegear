@@ -12,7 +12,8 @@ typedef enum TabID {
     kTabID_Display,
     kTabID_Controls,
     kTabID_Palette,
-    kTabID_ColorTemp,
+    kTabID_ColorTemp,       // GBC game: the stock page (its picture's header says PALETTE)
+    kTabID_ColorTempGB,     // Game Boy game: beside PALETTE, its own header text COLOR TEMP
     kTabID_System,
     kTabID_Games,                      // fr1: the game library (last: Left from the first tab reaches it)
     kNumTabIDs,

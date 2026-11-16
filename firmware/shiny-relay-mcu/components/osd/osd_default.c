@@ -23,8 +23,10 @@
 #include "system/wifi_link.h"
 #include "system/wifi_net.h"
 #include "system/network.h"
+#include "system/timeset.h"
 #include "system/download.h"
 #include "system/update.h"
+#include "system/custom.h"
 #include "system/play.h"
 #include "system/games.h"
 #include "system/getgames.h"
@@ -86,6 +88,7 @@ LV_IMG_DECLARE(menu_display);
 LV_IMG_DECLARE(menu_controls);
 LV_IMG_DECLARE(menu_palette);
 LV_IMG_DECLARE(menu_palette_gbc);
+LV_IMG_DECLARE(menu_colortemp);
 LV_IMG_DECLARE(menu_system);
 LV_IMG_DECLARE(menu_games);
 
@@ -98,6 +101,7 @@ static void CreateMenuSystem(lv_obj_t *const pScreen);
 static void CreateMenuGames(lv_obj_t *const pScreen);
 static bool IsPaletteTabActive(void);
 static bool IsColorTempTabActive(void);
+static bool IsColorTempGBTabActive(void);
 
 void OSD_Default_Init(lv_obj_t *const pScreen)
 {
@@ -455,6 +459,40 @@ static void CreateMenuPalette(lv_obj_t *const pScreen)
     }
 }
 
+// One COLOR TEMP setting for every game. A Game Boy Color game has the stock page (no PALETTE of its own, so the
+// picture's header says PALETTE); a Game Boy game has PALETTE and, right after it, this page under its own header
+// text COLOR TEMP (menu_colortemp). Only one of the two is ever active, so they share the page's widget.
+static void AddColorTempTab(lv_obj_t *const pScreen, TabCollection_t *const pList, TabItem_t *const pItem,
+                            MenuTab_t *const pTab, const TabID_t eID)
+{
+    OSD_Result_t eResult;
+
+    sys_dlist_init(&pList->WidgetList);
+
+    pTab->Accent = lv_color_make(0x92, 0x4E, 0xD7);
+
+    *pItem = (TabItem_t){
+        .Widget = {
+            .Name = "COLOR TEMP",
+            .fnDraw = GBCColorTemp_Draw,
+            .fnOnButton = GBCColorTemp_OnButton,
+            .fnOnTransition = GBCColorTemp_OnTransition,
+        },
+    };
+
+    if ((eResult = Tab_AddItem(pList, pItem, pScreen)) != kOSD_Result_Ok)
+    {
+        ESP_LOGE(TAG, "%s tab item init failed %d", pItem->Widget.Name, eResult);
+        return;
+    }
+
+    if ((eResult = MenuMgr_AddTab(eID, pTab)) != kOSD_Result_Ok)
+    {
+        ESP_LOGE(TAG, "%s widget init failed %d", pTab->Widget.Name, eResult);
+        return;
+    }
+}
+
 static void CreateMenuColorTemp(lv_obj_t *const pScreen)
 {
     static TabCollection_t ColorTempList;
@@ -470,33 +508,22 @@ static void CreateMenuColorTemp(lv_obj_t *const pScreen)
         .Menu = &ColorTempList,
         .fnIsActive = IsColorTempTabActive,
     };
+    AddColorTempTab(pScreen, &ColorTempList, &ColorTempItem, &Tab_ColorTemp, kTabID_ColorTemp);
 
-    OSD_Result_t eResult;
-
-    sys_dlist_init(&ColorTempList.WidgetList);
-
-    Tab_ColorTemp.Accent = lv_color_make(0x92, 0x4E, 0xD7);
-
-    ColorTempItem = (TabItem_t){
+    static TabCollection_t ColorTempListGB;
+    static TabItem_t ColorTempItemGB;
+    static MenuTab_t Tab_ColorTempGB = {
         .Widget = {
-            .Name = "COLOR TEMP",
-            .fnDraw = GBCColorTemp_Draw,
-            .fnOnButton = GBCColorTemp_OnButton,
-            .fnOnTransition = GBCColorTemp_OnTransition,
+            .Name = "MenuColorTempGB",
+            .fnDraw = TabList_Draw,
+            .fnOnButton = Tab_OnButton,
+            .fnOnTransition = TabList_OnTransition,
         },
+        .pImageDesc = &menu_colortemp,
+        .Menu = &ColorTempListGB,
+        .fnIsActive = IsColorTempGBTabActive,
     };
-
-    if ((eResult = Tab_AddItem(&ColorTempList, &ColorTempItem, pScreen)) != kOSD_Result_Ok)
-    {
-        ESP_LOGE(TAG, "%s tab item init failed %d", ColorTempItem.Widget.Name, eResult);
-        return;
-    }
-
-    if ((eResult = MenuMgr_AddTab(kTabID_ColorTemp, &Tab_ColorTemp)) != kOSD_Result_Ok)
-    {
-        ESP_LOGE(TAG, "%s widget init failed %d", Tab_ColorTemp.Widget.Name, eResult);
-        return;
-    }
+    AddColorTempTab(pScreen, &ColorTempListGB, &ColorTempItemGB, &Tab_ColorTempGB, kTabID_ColorTempGB);
 }
 
 static bool IsPaletteTabActive(void)
@@ -507,6 +534,11 @@ static bool IsPaletteTabActive(void)
 static bool IsColorTempTabActive(void)
 {
     return Style_IsGBCMode();
+}
+
+static bool IsColorTempGBTabActive(void)
+{
+    return !Style_IsGBCMode();
 }
 
 static void CreateMenuSystem(lv_obj_t *const pScreen)
@@ -604,6 +636,22 @@ static void CreateMenuSystem(lv_obj_t *const pScreen)
         return;
     }
 
+    // 1.1.7: the date and time by hand when Wi-Fi gave none (the game clocks are caught up by it)
+    static TabItem_t TimeSet = {
+        .Widget = {
+            .Name = "CLOCK",
+            .fnDraw = TimeSet_Draw,
+            .fnOnButton = TimeSet_OnButton,
+            .fnOnTransition = TimeSet_OnTransition,
+        },
+    };
+
+    if ((eResult = Tab_AddItem(pList, &TimeSet, pScreen)) != kOSD_Result_Ok)
+    {
+        ESP_LOGE(TAG, "%s tab item init failed %d", TimeSet.Widget.Name, eResult);
+        return;
+    }
+
     static TabItem_t Network = {
         .Widget = {
             .Name = "NETWORK",
@@ -696,6 +744,22 @@ static void CreateMenuSystem(lv_obj_t *const pScreen)
         ESP_LOGE(TAG, "%s tab item init failed %d", Update.Widget.Name, eResult);
         return;
     }
+    // 1.1.12: custom firmware from shinyrelay.com/custom-firmware (UPDATE is the official releases only)
+    static TabItem_t Custom = {
+        .Widget = {
+            .Name = "CUSTOM",
+            .fnDraw = Custom_Draw,
+            .fnOnButton = Custom_OnButton,
+            .fnOnTransition = Custom_OnTransition,
+        },
+    };
+
+    if ((eResult = Tab_AddItem(pList, &Custom, pScreen)) != kOSD_Result_Ok)
+    {
+        ESP_LOGE(TAG, "%s tab item init failed %d", Custom.Widget.Name, eResult);
+        return;
+    }
+    Custom_Register();                   // `cpage`
 #endif
     // A game's "play online" (SHLINK lk_ask, lane chromshlink1) opens the OSD on this item.
     NW_SetRoomMenuOpener(OpenRoomMenu);

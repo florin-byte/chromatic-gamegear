@@ -74,13 +74,15 @@ int      Sd_Rename(const char *from, const char *to);   /* lane mygames1: 0 = re
 int      Sd_Move(const char *from, const char *to);     /* fr3j: a file or folder moved, the target's folders made */
 
 /* the card's work task (sd.c): started when asked, gone when idle */
-enum { kSdOp_None, kSdOp_Mount, kSdOp_Refresh, kSdOp_Format, kSdOp_FormatExfat, kSdOp_Delete, kSdOp_Backup, kSdOp_ToCart, kSdOp_Job };
+enum { kSdOp_None, kSdOp_Mount, kSdOp_Refresh, kSdOp_Format, kSdOp_FormatExfat, kSdOp_Delete, kSdOp_Backup, kSdOp_ToCart, kSdOp_Job,
+       kSdOp_Look };   /* 1.1.6: still there? (a card that went in: its games read) */
 int      Sd_Ask(int op, const char *path);  /* 0 = taken (the task does it), -1 another op runs */
 /* lane ui110dev: SYSTEM > GAMES's jobs between the places (the cart hooks' job(), on this task): one at a time */
 enum { kSdJob_None, kSdJob_Backup,          /* the cartridge -> the card (game + save) */
        kSdJob_CardToCart, kSdJob_LibToCart,  /* a game -> the cartridge (kSdJf_BackupFirst: the cartridge to the card first) */
        kSdJob_CardToLib, kSdJob_CartToLib,   /* a game kept ON CHROMATIC (the library) */
-       kSdJob_LibToCard };                   /* a kept game (and its save) copied onto the card */
+       kSdJob_LibToCard,                     /* a kept game (and its save) copied onto the card */
+       kSdJob_SaveToCloud };                 /* lane savecloud1: a kept game's newest save up to the account's My games (no card needed) */
 #define kSdJf_BackupFirst 1
 int      Sd_AskJob(int kind, const char *path, uint32_t uid, int flags, const char *title);   /* as Sd_Ask */
 int      Sd_JobKind(void);                  /* the job running (or the last one) */

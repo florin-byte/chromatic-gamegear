@@ -16,7 +16,10 @@
 #include "../play.h"
 #include "../share.h"
 #include "tab_shared.h"
+#include "cf_sup.h"
 int Games_BenchView(void);
+/* cf_sup.c's crc32 (the unit's is cf_esp.c's): not exercised here, only linked */
+uint32_t cf_crc32(uint32_t crc, const uint8_t *b, uint32_t n) { crc = ~crc; while (n--) { crc ^= *b++; for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1u)); } return ~crc; }
 
 static int pass, fail;
 #define CHECK(c, ...) do { if (c) pass++; else { fail++; fprintf(stderr, "FAIL %s:%d: ", __FILE__, __LINE__); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } } while (0)
@@ -106,6 +109,7 @@ void Sd_Close(FIL *f) { (void)f; }
 
 /* ---- the places */
 static int card_reading = 0, lib_reading = 0;   /* 1.1.4: the card read again / lent, the library read */
+static int card_lent = 0;                        /* 1.1.6: the card lent (unmounted for the network's memory, still in) */
 static int cart = 1, card_st = kSdSt_Ready, card_n = 12, lib_n = 3, sd_op = kSdOp_None, sd_pct = -1, job_kind = 0, lib_busy = 0, lib_res = 0;
 static char cart_title[17] = "MR.TETRIS", sd_res[48] = "", job_step[24] = "", job_title[24] = "";
 static NwPlayView_t play = { kNwPv_None, "", "", 0 };
@@ -141,7 +145,13 @@ void NW_PlayAfterStop(int Card, uint32_t Uid, const char *Path) { if (Card) snpr
 void NW_CartTitle(char *Out, unsigned Len) { snprintf(Out, Len, "%s", cart_title); }
 bool NW_SdPlayingPath(const char *Path) { return playing_path[0] && !strcmp(Path, playing_path); }
 void NW_OpenPage(const char *Item) { open_calls++; snprintf(open_page, sizeof open_page, "%s", Item); }
+/* lane savecloud1: paired with a network saved; whether the opened kept game has a stored save (1 / 0 / -1 not known yet) */
+static int cloud_ready = 1, cloud_has = 0, cloud_forgot = 0;   /* ready, no stored save: no row (the pages that are not about it) */
+int  NW_SaveCloudReady(void) { return cloud_ready; }
+int  NW_SaveCloudHas(uint32_t Uid) { (void)Uid; return cloud_has; }
+void NW_SaveCloudForget(void) { cloud_forgot++; }
 int Sd_CartIn(void) { return cart; }
+int Sd_Lent(void) { return card_lent; }
 int Sd_State(void) { return card_st; }
 int Sd_Writable(void) { return card_st == kSdSt_Ready; }
 const char *Sd_StateWord(void) { return card_st == kSdSt_NoFs ? "NOT  FORMATTED" : card_st == kSdSt_Error ? "CARD  ERROR" : "NO  CARD"; }
@@ -204,7 +214,8 @@ int SdLib_Recent(uint32_t k, char *path, size_t pn, char *title, size_t tn)
     return 0;
 }
 static int mount_asks;
-int Sd_Ask(int op, const char *path) { if (op == kSdOp_Mount) mount_asks++; if (sd_op) return -1; if (op == kSdOp_Delete) { snprintf(sd_deleted, sizeof sd_deleted, "%s", path); sd_op = op; } return 0; }
+static int sd_asked[4], n_asked;   /* 1.1.6: the card task's asks (the last ones) */
+int Sd_Ask(int op, const char *path) { if (op == kSdOp_Mount) mount_asks++; if (sd_op) return -1; sd_asked[n_asked++ % 4] = op; if (op == kSdOp_Delete) { snprintf(sd_deleted, sizeof sd_deleted, "%s", path); sd_op = op; } return 0; }
 int Sd_Busy(void) { return sd_op; }
 void Sd_ClearResult(void) { sd_res[0] = 0; }
 int Sd_AskJob(int kind, const char *path, uint32_t uid, int flags, const char *title)
@@ -537,6 +548,7 @@ int main(void)
     go_list(); pick("SHINY CROSSER");
     card_reading = 1; shot("05b_list_card_reread");
     CHECK(!has(">MR.TETRIS") && !has(">POKEMON") && !has(">SHINY  KART") && !has(">EMERALD"), "card read again: the cursor does not jump up to another place");
+    CHECK(has(">SHINY  CROSSER") && !has("READING"), "1.1.6: card read again: its games stay in the list (no READING row)");
     card_reading = 0; shot("05c_list_card_back");
     CHECK(has(">SHINY  CROSSER"), "card back: the cursor on the same game");
     lib_reading = 1; shot("05d_list_lib_reread");
@@ -547,6 +559,38 @@ int main(void)
     card_n = 8; shot("05f_list_card_shorter");
     CHECK(has(">SHINY  CROSSER"), "the card's list shorter but the game still there: kept");
     card_n = 12;
+    /* 1.1.6 (a player on 1.1.5: "the menu jumping bug still exists"; unit 2, 1.1.5: a press while the card was read again
+       went from a list with no card games, Down round to the top: the CARTRIDGE; the card lent / mounted again for a moment
+       had no card state at all: "gone", the nearest game remembered for good) */
+    go_list(); pick("SHINY CROSSER");
+    card_reading = 1; press(kButton_Down); card_reading = 0; shot("05g_list_down_while_read");
+    CHECK(has(">SHINY  FIGHTER") && !has(">MR.TETRIS"), "Down while the card is read again: the next card game once it is read, not the cartridge");
+    card_reading = 1; press(kButton_Up); press(kButton_Up); card_reading = 0; draw();
+    CHECK(has(">SHINY  COLLECTION"), "two Ups while it is read: two card games up");
+    press(kButton_Down);
+    CHECK(has(">SHINY  CROSSER"), "Down from there as always");
+    card_st = kSdSt_None; card_lent = 1; shot("05h_list_card_lent");
+    CHECK(!has(">MR.TETRIS") && !has(">POKEMON") && !has(">SHINY  KART") && !has(">EMERALD"), "the card lent for the network: the cursor does not move to another place");
+    card_st = kSdSt_Ready; card_lent = 0; draw();
+    CHECK(has(">SHINY  CROSSER"), "the card back from the lend: the same game");
+    card_st = kSdSt_None; sd_op = kSdOp_Mount; shot("05i_list_card_mounting");
+    CHECK(!has(">MR.TETRIS") && !has(">EMERALD"), "the card being mounted again (no card state yet): the cursor waits");
+    card_st = kSdSt_Ready; draw(); sd_op = kSdOp_None; draw();
+    CHECK(has(">SHINY  CROSSER"), "mounted again: the same game");
+    card_st = kSdSt_None; shot("05j_list_card_out");
+    CHECK(has(">EMERALD  COLOR"), "the card really out: the nearest game");
+    card_st = kSdSt_Ready; draw();
+    CHECK(has(">SHINY  CROSSER"), "and the card in again (nothing pressed): back on the game picked");
+    /* 1.1.6 (owner): A on GAMES opens the list at its top, not where it was left */
+    go_list(); pick("SHINY CROSSER"); press(kButton_B); draw(); press(kButton_A); draw();
+    CHECK(has(">MR.TETRIS") && !has(">SHINY  CROSSER"), "the list opened again: at its top (the cartridge), not the game left");
+    /* 1.1.6 (owner: "why does it need to read the sd card so often"): the page's first ask reads the card's games, then
+       every 3 s only "still there?" */
+    n_asked = 0; (void)Games_OnTransition(NULL); draw();
+    CHECK(n_asked >= 1 && sd_asked[0] == kSdOp_Mount, "the page opened: the card's games read once");
+    for (int i = 0; i < 70; i++) draw();               /* (70 draws: 3.5 s of ticks) */
+    CHECK(n_asked >= 2 && sd_asked[(n_asked - 1) % 4] == kSdOp_Look, "then every 3 s: only whether the card is still there");
+    press(kButton_A); draw();
     for (int i = 0; i < 12 && !(has(">MR.TETRIS") && has("CARTRIDGE")); i++) press(kButton_Up);   /* (back to the cartridge for what follows) */
     CHECK(has(">MR.TETRIS") && has("CARTRIDGE"), "Up back to the cartridge");
     /* the cartridge's actions */
@@ -744,6 +788,73 @@ int main(void)
     t_core_page();
     t_library();
     t_core_pending();
+
+    /* lane savecloud1: SAVE TO MY GAMES on a kept game's page */
+    {
+        extern int GamesShare_Start, GamesShare_Calls;
+        (void)Games_OnTransition(NULL);
+        sd_op = kSdOp_None; sd_pct = -1; sd_res[0] = 0; lib_busy = 0; play.Kind = kNwPv_None; playing_uid = 0;
+        cart = 1; card_st = kSdSt_Ready; card_n = 12; lib_n = 3; GamesShare_Start = 0; GamesShare_Calls = 0;
+        cloud_ready = 1; cloud_has = 1; cloud_forgot = 0;
+        draw();
+        /* a card in, a cartridge in, SHARE on: six actions for five rows; the page follows the selection */
+        go_list(); pick("SHINY KART COLOR"); press(kButton_A); shot("50_cloud_game_top");
+        CHECK(cloud_forgot > 0, "the page asks afresh whether the game has a save when it opens it");
+        CHECK(has("!PLAY") && has("COPY  TO  CARD") && has("WRITE  TO  CARTRIDGE") && has("SHARE") && has("SAVE  TO  MY  GAMES") && !has("DELETE"), "six actions: the first five show");
+        press(kButton_Up); shot("51_cloud_game_delete");
+        CHECK(has("!DELETE") && has("SAVE  TO  MY  GAMES") && has("COPY  TO  CARD") && !has("PLAY"), "Up from the first goes round to DELETE and the window follows it");
+        press(kButton_Down); CHECK(has("!PLAY") && !has("DELETE"), "Down goes round to PLAY and back up the window");
+        for (int i = 0; i < 4; i++) press(kButton_Down);
+        shot("52_cloud_game_save_selected");
+        CHECK(has("!SAVE  TO  MY  GAMES"), "four Downs: SAVE TO MY GAMES selected");
+        press(kButton_A);
+        CHECK(asked.kind == kSdJob_SaveToCloud && asked.uid == 2, "A asks the save job for the game (kind %d uid %u)", asked.kind, (unsigned)asked.uid);
+        Sd_JobSetStep("SENDING  THE  SAVE"); sd_pct = 55; shot("53_cloud_busy");
+        CHECK(has("SAVING  ONLINE") && has("55%") && has("SHINY  KART  COLOR") && has("DO  NOT  TURN  OFF"), "busy: the words, the percent, the game, do not turn off");
+        finish_job(cf_sup_words(CF_SUP_OK)); shot("54_cloud_saved");
+        CHECK(has("!SAVED") && has("IT  IS  IN  MY  GAMES") && has("ON  YOUR  ACCOUNT") && has("!A:  OK"), "the result: SAVED");
+        press(kButton_A);
+        /* every way it can end, as the player reads it */
+        for (int r = CF_SUP_ALREADY; r < CF_SUP_N; r++) {
+            if (r == CF_SUP_E_AUTH || r == CF_SUP_E_PAIR) { if (r == CF_SUP_E_PAIR) continue; }
+            (void)Games_OnTransition(NULL); draw();
+            sd_op = kSdOp_Job; job_kind = kSdJob_SaveToCloud; Sd_JobSetStep("SENDING  THE  SAVE"); sd_pct = 30; snprintf(job_title, sizeof job_title, "SHINY KART COLOR");
+            draw(); press(kButton_A);
+            finish_job(cf_sup_words(r));
+            char nm[48]; snprintf(nm, sizeof nm, "55_cloud_result_%02d", r); shot(nm);
+            CHECK(has("!A:  OK") && (has("SAVED") || has("NOT  SAVED")), "outcome %d: a result page", r);
+            press(kButton_A);
+        }
+        /* when it is not offered */
+        (void)Games_OnTransition(NULL); sd_op = kSdOp_None; draw();
+        cloud_ready = 0; go_list(); pick("SHINY KART COLOR"); press(kButton_A); shot("56_cloud_not_paired");
+        CHECK(has("SAVE  TO  MY  GAMES") && has("!PLAY"), "not paired or no Wi-Fi saved: the row is there, pressing it says what is missing");
+        cloud_ready = 1; cloud_has = 0; draw(); shot("57_cloud_no_save");
+        CHECK(!has("SAVE  TO  MY  GAMES"), "the game has no stored save: no row");
+        cloud_has = -1; draw();
+        CHECK(!has("SAVE  TO  MY  GAMES"), "not known yet (being looked up): no row");
+        cloud_has = 1; draw();
+        CHECK(has("SAVE  TO  MY  GAMES"), "known: the row is there");
+        play.Kind = kNwPv_Playing; snprintf(play.Title, sizeof play.Title, "SHINY KART"); playing_uid = 2; draw(); shot("58_cloud_playing");
+        CHECK(has("STOP  PLAYING") && !has("SAVE  TO  MY  GAMES"), "the game playing: no row");
+        play.Kind = kNwPv_None; playing_uid = 0; draw();
+        /* a card game and the cartridge never offer it (only a game kept ON CHROMATIC) */
+        press(kButton_B); pick("KIRBY'S DREAM LAND 2"); press(kButton_A);
+        CHECK(!has("SAVE  TO  MY  GAMES"), "a card game: no row");
+        press(kButton_B); pick("MR.TETRIS"); press(kButton_A);
+        CHECK(!has("SAVE  TO  MY  GAMES"), "the cartridge: no row");
+        /* something else running: the row says NOT NOW, nothing is asked */
+        press(kButton_B); pick("SHINY KART COLOR"); press(kButton_A);
+        for (int i = 0; i < 4; i++) press(kButton_Down);
+        lib_busy = 1; asked.kind = 0; press(kButton_A); shot("59_cloud_not_now");
+        CHECK(has("NOT  NOW") && asked.kind == 0, "a library job running: NOT NOW, nothing asked");
+        lib_busy = 0; press(kButton_A);
+        /* no card, no cartridge, SHARE off: the row is among four */
+        cart = 0; card_st = kSdSt_None; GamesShare_Start = -1; (void)Games_OnTransition(NULL); draw();
+        press(kButton_A); pick("SHINY KART COLOR"); press(kButton_A); shot("60_cloud_game_four_rows");
+        CHECK(has("PLAY") && has("SAVE  TO  MY  GAMES") && has("DELETE") && !has("COPY  TO  CARD") && !has("WRITE  TO"), "no card, no cartridge: PLAY, SAVE TO MY GAMES, DELETE");
+        cart = 1; card_st = kSdSt_Ready; GamesShare_Start = -1; cloud_ready = 1; cloud_has = 0;
+    }
     fprintf(stderr, "games_shots: %d passed, %d failed\n", pass, fail);
     return fail ? 1 : 0;
 }

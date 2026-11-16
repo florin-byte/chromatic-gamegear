@@ -7,16 +7,34 @@
 #if defined(ESP_PLATFORM)
 #include "esp_console.h"
 #include "esp_app_desc.h"
+#include "nw_dev.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <stdlib.h>
+#include <string.h>
 #endif
 
-#ifndef CONFIG_CHROMATIC_FW_VER_STR
+#if defined(FW_HOST_TEST)
+const char *FwHost_AppVersion(void);   /* status/host/fw_shots.c: the version the page is drawn with */
+#elif !defined(CONFIG_CHROMATIC_FW_VER_STR)
 #error "The top-level Chromatic firmware version string must be defined."
 #endif
 
 LV_IMG_DECLARE(img_chromatic);
 
+/* The whole version is shown: "v" and the app's version (esp_app_desc_t.version, 31 characters at most), on a row
+ * of its own under "MCU:". Beside "MCU:" the row has 45 px, and a custom build's "v1.1.12-cfw.8104" needs 55: it was
+ * cut at the box's edge, and the old 16 byte field cut it at 15 characters before that. The row under "MCU:" is the
+ * box's full width (kDetailsW_px). The three rows are MCU:, the version, FPGA, 7 px apart, MCU first as the page
+ * always had it. The FPGA row shows the version only ("v18.33"): every Shiny Relay FPGA sets the version's debug bit
+ * (it marks a build that is not ModRetro's own) and the page used to add " (dbg)" for it, which is not for the
+ * person to read and ran into the picture of the Chromatic on the third row. The bit is still kept
+ * (FPGA_IsDebugBuild). The FW view is where it always was.
+ * system/host/fw_shots.c draws this page with the longest versions and fails when a pixel of them is outside the
+ * box or the panel or touches the picture. The build service measures each custom build's version against
+ * kMaxVerLen, kDetailsW_px and MCUVerOrigin's x below, so keep those three lines in this form. */
 enum {
-    kMaxVerLen = 16,
+    kMaxVerLen = 34,
     kTextH_px  = 5,
 
     kOriginX_px = 73,  // top left corner of right section
@@ -26,24 +44,24 @@ enum {
     kHeaderPadY_px = 6,
 
     kDetailsPadX_px = kHeaderPadX_px,
-    kDetailsPadY_px = kHeaderPadY_px + kTextH_px + 6,
-    kDetailsH_px    = 18,
+    kDetailsPadY_px = kHeaderPadY_px + kTextH_px + 5,
+    kDetailsH_px    = 24,
     kDetailsW_px    = 65,
 
     kChromaticX_px = -17,  // Relative to bottom right
     kChromaticY_px = -38,
 
-    kTextPadY_px  = kTextH_px + 3,  // Offset between lines of text
+    kTextPadY_px  = kTextH_px + 2,  // Offset between lines of text
     kTitlePadX_px = 20              // Offset for title vs version text
 };
 
 static const lv_point_t HeaderOrigin    = {.x = kOriginX_px + kHeaderPadX_px, .y = kOriginY_px + kHeaderPadY_px};
 static const lv_point_t DetailsOrigin   = {.x = kOriginX_px + kDetailsPadX_px, .y = kOriginY_px + kDetailsPadY_px};
 static const lv_point_t ChromaticOrigin = {.x = kChromaticX_px, .y = kChromaticY_px};
-static const lv_point_t FWTitleOrigin   = {.x = 0, .y = 0 };  // Relative to DetailsOrigin
+static const lv_point_t FWTitleOrigin   = {.x = 0, .y = 1 };  // Relative to DetailsOrigin
 static const lv_point_t FWVerOrigin     = {.x = FWTitleOrigin.x + kTitlePadX_px, .y = FWTitleOrigin.y };
 static const lv_point_t MCUTitleOrigin  = {.x = 0, .y = 0 };
-static const lv_point_t MCUVerOrigin    = {.x = MCUTitleOrigin.x + kTitlePadX_px, .y = MCUTitleOrigin.y };
+static const lv_point_t MCUVerOrigin    = {.x = MCUTitleOrigin.x, .y = MCUTitleOrigin.y + kTextPadY_px };
 static const lv_point_t FPGATitleOrigin = {.x = 0, .y = MCUVerOrigin.y + kTextPadY_px };
 static const lv_point_t FPGAVerOrigin   = {.x = FPGATitleOrigin.x + kTitlePadX_px, .y = FPGATitleOrigin.y };
 static const lv_point_t DetailsSize     = {.x = kDetailsW_px, .y = kDetailsH_px};
@@ -69,9 +87,10 @@ typedef struct Firmware {
 } Firmware_t;
 
 static Firmware_t _Ctx;
-static const char* TAG = "fw";
+static volatile bool _BenchA;   // the bench console's A press (`ipage a`), taken by the next draw
 
 #if defined(ESP_PLATFORM)
+static const char* TAG = "fw";
 static int version_command(int argc, char **argv);
 static OSD_Result_t register_version_dump(void);
 #endif
@@ -84,6 +103,12 @@ OSD_Result_t Firmware_Draw(void* arg)
     }
 
     lv_obj_t *const pScreen = (lv_obj_t *const) arg;
+
+    if (_BenchA)
+    {
+        _BenchA = false;
+        (void)Firmware_OnButton(kButton_A, kButtonState_Pressed, NULL);
+    }
 
     if (_Ctx.pHeaderObj == NULL)
     {
@@ -142,10 +167,9 @@ OSD_Result_t Firmware_Draw(void* arg)
         {
             lv_snprintf(
                 _Ctx.FPGAVerStr, sizeof(_Ctx.FPGAVerStr),
-                "v%u.%u%s",
+                "v%u.%u",
                 _Ctx.FPGAVersionMajor,
-                _Ctx.FPGAVersionMinor,
-                _Ctx.FPGA_IsDebugBuild ? " (dbg)" : " "
+                _Ctx.FPGAVersionMinor
             );
             _Ctx.pFPGAInfo = lv_label_create(_Ctx.pDetailsObj);
             lv_label_set_text(_Ctx.pFPGAInfo, (const char*)_Ctx.FPGAVerStr);
@@ -252,6 +276,9 @@ OSD_Result_t Firmware_Initialize(void)
     lv_snprintf(_Ctx.AppFWVerStr, sizeof(_Ctx.AppFWVerStr), "v%s", pDesc->version);
     lv_snprintf(_Ctx.ChromaticFWVerStr, sizeof(_Ctx.ChromaticFWVerStr), "v%s", CONFIG_CHROMATIC_FW_VER_STR);
     eResult = register_version_dump();
+#elif defined(FW_HOST_TEST)
+    lv_snprintf(_Ctx.AppFWVerStr, sizeof(_Ctx.AppFWVerStr), "v%s", FwHost_AppVersion());
+    lv_snprintf(_Ctx.ChromaticFWVerStr, sizeof(_Ctx.ChromaticFWVerStr), "v%s", "4.6");
 #else
     lv_snprintf(_Ctx.AppFWVerStr, sizeof(_Ctx.AppFWVerStr), "v%s", "1.00-SIM");
     lv_snprintf(_Ctx.ChromaticFWVerStr, sizeof(_Ctx.ChromaticFWVerStr), "v%s", "1.0-SIM");
@@ -277,8 +304,30 @@ static int version_command(int argc, char **argv)
     return 0;
 }
 
+// bench console (as `gpage`): ipage [show|a] [MS], then the page's labels as set ("!" = white): SYSTEM INFO for
+// `osdshot`. show opens SYSTEM > FIRMWARE; a is the A button (FW <-> MCU / FPGA). The press deletes the page's
+// labels, which only the display task may do, so it is left for the page's next draw (_BenchA).
+static int cmd_ipage(int argc, char **argv)
+{
+    if (argc >= 2 && !strcmp(argv[1], "show")) NW_OpenPage("FIRMWARE");
+    if (argc >= 2 && !strcmp(argv[1], "a")) _BenchA = true;
+    vTaskDelay(pdMS_TO_TICKS(argc >= 3 ? atoi(argv[2]) : 400));
+    lv_obj_t *const Rows[] = { _Ctx.pFWTitle, _Ctx.pFWInfo, _Ctx.pMCUTitle, _Ctx.pMCUInfo, _Ctx.pFPGATitle, _Ctx.pFPGAInfo };
+    printf("ipage: e=0 details %d rows ", _Ctx.ShowDetails);
+    for (size_t i = 0; i < ARRAY_SIZE(Rows); i++)
+    {
+        printf("%s%s%s", i ? "|" : "", (i & 1) ? "!" : "", Rows[i] ? lv_label_get_text(Rows[i]) : "");
+    }
+    printf("\n");
+    return 0;
+}
+
 static OSD_Result_t register_version_dump(void)
 {
+    const esp_console_cmd_t ipage = { .command = "ipage", .help = "SYSTEM INFO (bench): ipage [show|a] [MS]", .func = &cmd_ipage };
+    (void)esp_console_cmd_register(&ipage);
+
+
     esp_console_cmd_t command = {
         .command = "fwversion",
         .help = "Print the device version information",

@@ -7,7 +7,7 @@ if(CONFIG_NW_CARTFLASH)
     list(APPEND srcs "cartflash/cf_esp.c" "cartflash/cf_chips.c" "cartflash/cf_dev.c" "cartflash/cf_usb.c" "cartflash/cf_sha256.c" "cartflash/cf_rc_dev.c" "cartflash/cf_fota.c" "cartflash/cf_sgz.c" "cartflash/cf_inflate.c" "cartflash/cf_lib.c")
     if(CONFIG_NW_CARTFLASH_WIFI)
         # the Wi-Fi install ("Send to my Chromatic"): not in the USB-only build
-        list(APPEND srcs "cartflash/cf_fetch.c" "cartflash/cf_install.c" "cartflash/cf_bps.c" "cartflash/cf_ota.c" "cartflash/cf_pack.c" "cartflash/cf_share.c" "cartflash/cf_share_dev.c")
+        list(APPEND srcs "cartflash/cf_fetch.c" "cartflash/cf_install.c" "cartflash/cf_bps.c" "cartflash/cf_ota.c" "cartflash/cf_pack.c" "cartflash/cf_share.c" "cartflash/cf_share_dev.c" "cartflash/cf_sup.c")
     endif()
     list(APPEND incs "cartflash")
 endif()

@@ -124,4 +124,30 @@ int  sdc_rtc_get(const uint8_t *f, uint32_t len, uint8_t rtc[5], uint64_t *unix_
 /* the clock advanced by s seconds (as the FPGA counts it: the day counter carries into DH bit 7) */
 void sdc_rtc_advance(uint8_t rtc[5], uint64_t s);
 
+/* 1.1.7: a game's clock from the load to its saves. The unit has no clock of its own when it is off, so the real time comes
+ * from the network at power-on; a game that is saved says WHEN its clock was true (t), and the next load advances the clock by
+ * the time that passed. When the real time is not known (no Wi-Fi), the clock is neither moved nor lost: the time the game
+ * ran (uptime) is added to the last real time known for it, so the next time the network is there the whole gap is caught up.
+ * All times are unix seconds, 0 = not known; up is the unit's uptime in seconds. */
+typedef struct {
+    uint64_t t_ref;     /* the real time the game's clock was true at the load; 0 = not known */
+    int64_t  up0;       /* the uptime at the load */
+    uint8_t  pending;   /* the load could not catch the clock up (no real time then): a save with the time known does */
+} sdc_clk_t;
+/* rtc: the clock as saved (advanced here when both times are known). 1 = it was advanced */
+int  sdc_clk_load(sdc_clk_t *c, uint8_t rtc[5], uint64_t t_saved, uint64_t now, int64_t up);
+/* rtc: the live clock (advanced here when the load could not catch up and the time is known now). Returns the time to keep
+ * with it (0 = not known). Never moves the clock back; a halted clock does not move. */
+uint64_t sdc_clk_save(const sdc_clk_t *c, uint8_t rtc[5], uint64_t now, int64_t up);
+
+/* a time kept in 24 bits (the library's journal record has 3 spare bytes): whole seconds after 2025-01-01 modulo 2^24 (194 days),
+ * 0 = not known. Whole seconds, so saving and loading never rounds: with no time passing the game clock never moves, and the
+ * catch-up is exact. The day count is told by an anchor (the real time now, else the last one known): a time up to 194 days before
+ * it (less SDC_TSEC_AHEAD) is read right; a gap longer than that is read as its remainder (the game clock counts 511 days at most). */
+#define SDC_T_EPOCH 1735689600ull
+#define SDC_TSEC_MASK 0xFFFFFFu
+#define SDC_TSEC_AHEAD 604800u                         /* a saved time up to 7 days ahead of the anchor is read as ahead, not as 187 days ago */
+uint32_t sdc_tsec_pack(uint64_t t);                    /* 0 = not known (t 0 or before 2025) */
+uint64_t sdc_tsec_unpack(uint32_t v, uint64_t anchor); /* 0 = not known (v 0, or no anchor) */
+
 uint32_t sdc_crc32(uint32_t c, const void *b, size_t n);

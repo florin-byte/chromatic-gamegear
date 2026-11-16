@@ -202,6 +202,39 @@ int main(void)
           "5000 saves, %ld cuts: every newest save there, A's from the start too (%d bad; journal seq %u)", cuts, bad, L.jseq);
     unsigned emax = 0, jmax = 0;
     for (unsigned s = 0; s < FMAX / 0x1000; s++) { if (n_erase[s] > emax) emax = n_erase[s]; if (s >= 16 && s < 32 && n_erase[s] > jmax) jmax = n_erase[s]; }
+    /* savefast1: a save's erase happens ahead of it; a cut at any op of a prepared save leaves the old save or the new one */
+    {
+        power_on();
+        const uint32_t G = add(9, 0x2000, 0x8000, "PREP");
+        CHECK(G != 0, "a game for the prepared saves");
+        CHECK(put(G, 9, 1, 0x8000) == 0, "its first save");
+        CHECK(cf_lib_save_prepare(&L, G) == 0, "prepare");
+        CHECK(cf_lib_save_prepare(&L, G) == 0 && L.ready, "prepare again: still ready");
+        unsigned before = 0, after = 0;
+        for (unsigned s2 = 0; s2 < FMAX / 0x1000; s2++) before += n_erase[s2];
+        CHECK(put(G, 9, 2, 0x8000) == 0 && s_version(&L, G, 9, 200) == 2, "a prepared save");
+        for (unsigned s2 = 0; s2 < FMAX / 0x1000; s2++) after += n_erase[s2];
+        CHECK(after == before, "a prepared save has no erase of its own (%u erases)", after - before);
+        CHECK(!L.ready, "after a save the slot is not known blank");
+        power_on();
+        CHECK(s_version(&L, G, 9, 200) == 2 && !L.ready, "after a power on: the save, and nothing known blank");
+        int finished = 0;
+        for (long cut = 0; cut < 60 && !finished; cut++) {
+            power_on();
+            CHECK(cf_lib_save_prepare(&L, G) == 0, "prepare before the cut");
+            const int old = s_version(&L, G, 9, 200);
+            cut_at = ops + cut;
+            const int want = 3 + (int)cut;
+            const int e = put(G, 9, (uint32_t)want, 0x8000);
+            power_on();
+            const int v = s_version(&L, G, 9, 200);
+            CHECK(v == want || (e && v == old), "cut %ld of a prepared save: the old or the new, whole (%d, old %d)", cut, v, old);
+            finished = !e;
+        }
+        CHECK(finished, "the cuts walked the whole save");
+        power_on();
+        CHECK(cf_lib_del(&L, G) == 0, "its game goes again");
+    }
     printf("wear after it all: the most-erased sector %u times, the journal's most %u times\n", emax, jmax);
 
     /* ---- full: one game of 2.5 MB after the others are deleted; then a 17th game refused */
@@ -304,6 +337,33 @@ int main(void)
     CHECK(cf_lib_cart_save(0x1A, 0x05) == 0 && cf_lib_cart_save(0x00, 0) == 0 && cf_lib_cart_save(0x1B, 0x07) == 0, "no battery: nothing kept; a bad RAM code: nothing");
     CHECK(cf_lib_room_for(2883317u, 0x10000u) == 3014656u && cf_lib_room_for(2819385u, 0x10000u) == 2953216u,
           "Emerald Color + 64 KiB save: 4 KiB blocks 3,014,656 (> 2,977,792), 8 KiB blocks 2,953,216 (fits)");
+
+    /* ---- 1.1.7: the time a save's clock was true (the journal record's spare bytes, 24-bit seconds; 0 = not known) */
+    {
+        memset(F, 0x5A, sizeof F); ops = 0; cut_at = -1; dead = 0;
+        CHECK(cf_lib_open(&L, &FL) == 0, "a fresh area");
+        const uint32_t A = add(7, 100000, 0x800, "CLOCK A"), B = add(8, 100000, 0x800, "CLOCK B"), O = add(9, 100000, 0x800, "OLD SAVE");
+        CHECK(A && B && O, "three games");
+        sv_src_t s1 = { 7, 1 }, s2 = { 9, 1 };
+        const uint8_t rt[5] = { 1, 2, 3, 4, 0 };
+        CHECK(cf_lib_save_put_t(&L, A, 0x800, rt, 123456, s_get, &s1) == 0, "a save with its time");
+        CHECK(cf_lib_save_put(&L, O, 0x800, rt, s_get, &s2) == 0, "a save through the old call (no time)");
+        cf_lib_save_t sv;
+        CHECK(cf_lib_save_get(&L, A, &sv) == 0 && sv.tsec == 123456 && !memcmp(sv.rtc, rt, 5), "its time is in the save record");
+        power_on();
+        CHECK(cf_lib_save_get(&L, A, &sv) == 0 && sv.tsec == 123456 && sv.rtc[3] == 4, "... after a power on");
+        CHECK(cf_lib_save_get(&L, O, &sv) == 0 && sv.seq && sv.tsec == 0 && !memcmp(sv.rtc, rt, 5), "a save without a time (a record from 1.1.6 has zeros there): not known, the clock as before");
+        CHECK(cf_lib_save_put_t(&L, A, 0x800, rt, 0xFFFFFF, s_get, &s1) == 0 && cf_lib_save_get(&L, A, &sv) == 0 && sv.tsec == 0xFFFFFF, "all 24 bits");
+        CHECK(cf_lib_save_put_t(&L, A, 0x800, rt, 123457, s_get, &s1) == 0, "A saved again");
+        /* many saves of B: the journal sector fills and A's record is carried to the next one with its time */
+        int ok = 1;
+        for (int i = 0; i < 400 && ok; i++) { sv_src_t sb = { 8, (uint32_t)i + 1 }; ok = cf_lib_save_put_t(&L, B, 0x800, rt, 5000u + (uint32_t)i, s_get, &sb) == 0; }
+        CHECK(ok, "400 saves of another game");
+        power_on();
+        CHECK(cf_lib_save_get(&L, A, &sv) == 0 && sv.tsec == 123457, "A's time survived the journal's turns (carried with its record)");
+        CHECK(cf_lib_save_get(&L, O, &sv) == 0 && sv.tsec == 0 && sv.seq, "the old one still has none");
+        CHECK(cf_lib_save_get(&L, B, &sv) == 0 && sv.tsec == 5399, "B's newest time");
+    }
 
     printf("cf_lib: %d passed, %d failed\n", pass, fail);
     return fail ? 1 : 0;

@@ -1,10 +1,11 @@
 # ESP32 firmware
 
 `shiny-relay-mcu/` started as the `mcu/` directory of Shiny Relay 1.1.5 (GPL-3.0, source archive
-`shiny-relay-src-1.1.5.tar.gz` from https://install.shinyrelay.com), unchanged; the changes made in this
-repository are listed in `../CHANGES.md`. `LICENSES/` and `NOTICE.md` are the ones of that archive.
+`shiny-relay-src-1.1.5.tar.gz` from https://install.shinyrelay.com), unchanged, and was brought to Shiny Relay
+1.1.12 (`shiny-relay-src-1.1.12.tar.gz`) by a three-way merge; the changes made in this repository are listed in
+`../CHANGES.md`. `LICENSES/` and `NOTICE.md` are the ones of those archives (the same in both).
 
-The version built from this tree is `1.1.5-fr3o` (`shiny-relay-mcu/sdkconfig.wifiinst`).
+The version built from this tree is `1.1.12-fr4a` (`shiny-relay-mcu/sdkconfig.wifiinst`).
 
 ## Tests on a PC (no ESP-IDF needed, gcc and make)
 

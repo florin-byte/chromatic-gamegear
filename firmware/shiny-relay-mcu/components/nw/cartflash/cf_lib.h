@@ -81,6 +81,7 @@ typedef struct {
     uint16_t slot;
     uint32_t size, crc;
     uint8_t  rtc[5];
+    uint32_t tsec;                        /* 1.1.7: when the clock was true: whole seconds after 2025-01-01 modulo 2^24 (sd_core.h sdc_tsec_*), 0 = not known */
 } cf_lib_save_t;
 
 /* a game being added as a stream (small: the caller may keep it, e.g. in NVS across a restart) */
@@ -105,6 +106,9 @@ typedef struct {
     uint32_t jseq;
     cf_lib_save_t sv[CF_LIB_MAX_GAMES];   /* per index entry (same order) */
     uint8_t  svsect[CF_LIB_MAX_GAMES];    /* the sector each newest record is in (0xFF: none) */
+    int      ready;                       /* savefast1: ready_slot of ready_uid is erased (this boot only) */
+    uint32_t ready_uid;
+    uint16_t ready_slot;
     uint8_t  buf[CF_LIB_BUF];             /* scratch */
 } cf_lib_t;
 
@@ -142,6 +146,10 @@ int  cf_lib_read(cf_lib_t *L, uint32_t uid, uint32_t off, uint8_t *b, uint32_t n
 int  cf_lib_save_get(cf_lib_t *L, uint32_t uid, cf_lib_save_t *sv);
 int  cf_lib_save_read(cf_lib_t *L, uint32_t uid, const cf_lib_save_t *sv, uint32_t off, uint8_t *b, uint32_t n);
 /* a new save (get gives its bytes, n <= 2048, in order): into the next slot, read back, then its journal record */
+int  cf_lib_save_prepare(cf_lib_t *L, uint32_t uid);          /* savefast1: erase the slot the next save goes to, ahead of it */
 int  cf_lib_save_put(cf_lib_t *L, uint32_t uid, uint32_t size, const uint8_t rtc[5],
                      int (*get)(void *u, uint32_t off, uint8_t *b, uint32_t n), void *gu);
+/* the same with the time the clock was true (the journal record's spare bytes: records from before have 0 there = not known) */
+int  cf_lib_save_put_t(cf_lib_t *L, uint32_t uid, uint32_t size, const uint8_t rtc[5], uint32_t tsec,
+                       int (*get)(void *u, uint32_t off, uint8_t *b, uint32_t n), void *gu);
 #endif

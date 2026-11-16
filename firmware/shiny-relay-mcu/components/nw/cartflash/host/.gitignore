@@ -11,3 +11,5 @@ cf_sgz_test
 cf_sgz_test_unit
 cf_rc_win_test
 cf_install_test
+cf_sleep_test
+cf_sup_test

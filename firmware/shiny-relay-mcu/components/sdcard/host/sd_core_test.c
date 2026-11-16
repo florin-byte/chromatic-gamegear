@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../sd_core.h"
+#include "../../cwl/cwl_civil.h"
 
 static int fails, passes;
 static void check(int ok, const char *what) { if (ok) passes++; else { fails++; printf("FAIL: %s\n", what); } }
@@ -138,6 +139,144 @@ static void t_rtc(void)
     check(hlt[0] == 1 && hlt[1] == 2, "a halted clock does not move");
 }
 
+/* 1.1.7: a game's clock from the load to its saves */
+static int rtc_eq(const uint8_t *a, int sec, int min, int hr, int day, int dh7)
+{
+    return a[0] == sec && a[1] == min && a[2] == hr && a[3] == (day & 0xFF) && (a[4] & 1) == ((day >> 8) & 1) && !!(a[4] & 0x80) == dh7;
+}
+static void t_clock(void)
+{
+    const uint64_t T0 = 1790000000ull;
+    sdc_clk_t c;
+    uint8_t r[5];
+    /* catch-up over days */
+    memcpy(r, (uint8_t[5]){ 30, 20, 10, 5, 0 }, 5);
+    check(sdc_clk_load(&c, r, T0, T0 + 3ull * 86400 + 3600 + 90, 100) == 1 && rtc_eq(r, 0, 22, 11, 8, 0), "3 days 1 h 90 s later: the clock advanced by that");
+    uint8_t k[5]; memcpy(k, (uint8_t[5]){ 1, 2, 3, 8, 0 }, 5);
+    check(sdc_clk_save(&c, k, T0 + 3ull * 86400 + 3600 + 90 + 50, 150) == T0 + 3ull * 86400 + 3600 + 140 && rtc_eq(k, 1, 2, 3, 8, 0), "saved with the real time when it was known at the load");
+    /* 511-day overflow and the carry bit */
+    memcpy(r, (uint8_t[5]){ 0, 0, 0, 0xFF, 1 }, 5);                 /* day 511 */
+    sdc_clk_load(&c, r, T0, T0 + 86400, 0);
+    check(rtc_eq(r, 0, 0, 0, 0, 1), "day 511 + 1 day: day 0 and the carry bit (DH 7)");
+    memcpy(r, (uint8_t[5]){ 5, 0, 0, 100, 0x80 }, 5);               /* the carry already set stays */
+    sdc_clk_load(&c, r, T0, T0 + 10, 0);
+    check(rtc_eq(r, 15, 0, 0, 100, 1), "the carry bit set before stays set");
+    memcpy(r, (uint8_t[5]){ 0, 0, 0, 10, 0 }, 5);
+    sdc_clk_load(&c, r, T0, T0 + 600ull * 86400, 0);                /* 600 days: 10 + 600 = 610 -> 98, carry */
+    check(rtc_eq(r, 0, 0, 0, 98, 1), "600 days: wraps once, carry set");
+    /* halted */
+    memcpy(r, (uint8_t[5]){ 7, 8, 9, 10, 0x40 }, 5);
+    check(sdc_clk_load(&c, r, T0, T0 + 5000, 0) == 1 && r[0] == 7 && r[1] == 8 && r[2] == 9 && r[3] == 10 && r[4] == 0x40, "a halted clock (DH bit 6) does not move");
+    /* never backwards: a saved time later than now, or equal */
+    memcpy(r, (uint8_t[5]){ 7, 8, 9, 10, 0 }, 5);
+    check(sdc_clk_load(&c, r, T0 + 1000, T0, 0) == 0 && rtc_eq(r, 7, 8, 9, 10, 0), "a saved time after now: the clock is not moved back");
+    check(sdc_clk_load(&c, r, T0, T0, 0) == 0 && rtc_eq(r, 7, 8, 9, 10, 0), "the same second: not moved");
+    /* an old record without a time: as before */
+    memcpy(r, (uint8_t[5]){ 7, 8, 9, 10, 0 }, 5);
+    check(sdc_clk_load(&c, r, 0, T0, 0) == 0 && rtc_eq(r, 7, 8, 9, 10, 0), "no time with the record: loaded as it was");
+    memcpy(k, r, 5);
+    check(sdc_clk_save(&c, k, T0 + 60, 60) == T0 + 60, "... and the next save has the time (a record from 1.1.7)");
+    /* no real time at the load, none at the save: the last real time plus the time played; the clock is not touched */
+    memcpy(r, (uint8_t[5]){ 0, 0, 1, 2, 0 }, 5);
+    check(sdc_clk_load(&c, r, T0, 0, 1000) == 0 && rtc_eq(r, 0, 0, 1, 2, 0), "no Wi-Fi: the clock loads as it was left");
+    memcpy(k, (uint8_t[5]){ 0, 30, 1, 2, 0 }, 5);                   /* the game ran 1800 s */
+    check(sdc_clk_save(&c, k, 0, 2800) == T0 + 1800 && rtc_eq(k, 0, 30, 1, 2, 0), "... saved: T0 + the time played, the clock as the game has it");
+    /* then the Wi-Fi power-on catches up the whole time away */
+    const uint64_t T1 = T0 + 1800 + 2ull * 86400 + 7200;             /* two days 2 h after that save */
+    memcpy(r, k, 5);
+    sdc_clk_load(&c, r, T0 + 1800, T1, 5);
+    check(rtc_eq(r, 0, 30, 3, 4, 0), "the next power-on with Wi-Fi: 2 days 2 h more, and only the time away");
+    /* no time at all: before and after */
+    memcpy(r, (uint8_t[5]){ 1, 1, 1, 1, 0 }, 5);
+    sdc_clk_load(&c, r, 0, 0, 50);
+    memcpy(k, r, 5);
+    check(sdc_clk_save(&c, k, 0, 900) == 0 && rtc_eq(k, 1, 1, 1, 1, 0), "no time ever known: nothing kept, nothing moved");
+    /* the time arrives while the game runs (the load had none): the save catches up the gap before the load only */
+    memcpy(r, (uint8_t[5]){ 0, 0, 0, 0, 0 }, 5);
+    sdc_clk_load(&c, r, T0, 0, 1000);                                /* left at T0; no time at the load */
+    memcpy(k, (uint8_t[5]){ 20, 0, 0, 0, 0 }, 5);                    /* played 20 s */
+    const uint64_t now = T0 + 3600 + 20;                             /* the game started at T0 + 3600 */
+    check(sdc_clk_save(&c, k, now, 1020) == now && rtc_eq(k, 20, 0, 1, 0, 0), "time arrives mid-game: 1 h away caught up at the save, the 20 s played not counted twice");
+    memcpy(k, (uint8_t[5]){ 40, 0, 0, 0, 0 }, 5);                    /* a later save: the live clock has no catch-up in it, again applied */
+    check(sdc_clk_save(&c, k, now + 20, 1040) == now + 20 && rtc_eq(k, 40, 0, 1, 0, 0), "... and again at the next save");
+    /* the uptime going wrong (smaller): no negative time */
+    memcpy(k, r, 5);
+    check(sdc_clk_save(&c, k, 0, 10) == T0, "uptime before the load's: zero played");
+    /* the 24-bit seconds */
+    check(sdc_tsec_pack(0) == 0 && sdc_tsec_pack(SDC_T_EPOCH) == 0 && sdc_tsec_unpack(0, T0) == 0 && sdc_tsec_unpack(5, 0) == 0, "0, a time before 2025 and no anchor: not known");
+    check(sdc_tsec_pack(SDC_T_EPOCH + 1000) == 1000 && sdc_tsec_pack(SDC_T_EPOCH + 0x1000000ull) == 1, "whole seconds; the one that would be 0 is read as 1");
+    {
+        const uint64_t t = T0 + 12345;
+        const uint32_t v = sdc_tsec_pack(t);
+        check(sdc_tsec_unpack(v, t) == t, "unpack at the same second");
+        check(sdc_tsec_unpack(v, t + 90) == t && sdc_tsec_unpack(v, t + 86400ull * 100) == t, "unpack 90 s and 100 days later");
+        check(sdc_tsec_unpack(v, t + 0xFFFFFFull - 604800) == t, "unpack just inside the window (194 days less a week)");
+        check(sdc_tsec_unpack(v, t - 5) == t && sdc_tsec_unpack(v, t - 86400ull * 3) == t, "a saved time a little ahead of the anchor (a clock that ran fast): read as ahead, never as 194 days ago");
+        check(sdc_tsec_unpack(v, t + 0x1000000ull + 60) == t + 0x1000000ull, "past 194 days: the remainder (a long gap reads as its remainder)");
+    }
+    /* catch-up through the 24-bit time is exact (no rounding) */
+    {
+        uint8_t a[5] = { 0, 0, 0, 0, 0 }, b[5] = { 0, 0, 0, 0, 0 };
+        const uint64_t ts = SDC_T_EPOCH + 5000ull * 60 + 41, tn = ts + 4 * 86400 + 12345;
+        sdc_rtc_advance(b, tn - ts);
+        sdc_clk_load(&c, a, sdc_tsec_unpack(sdc_tsec_pack(ts), tn), tn, 0);
+        check(!memcmp(a, b, 5), "through the 24-bit time: the same clock as with the exact one");
+    }
+    /* repeated save / load cycles on ON CHROMATIC: no drift at 0 s and at 59 s apart (the 24-bit time is the only thing kept) */
+    for (int gap = 0; gap <= 59; gap += 59) {
+        uint8_t clock[5] = { 10, 20, 5, 7, 0 }, want[5];
+        memcpy(want, clock, 5);
+        uint32_t v = sdc_tsec_pack(T0);
+        uint64_t now = T0;
+        for (int i = 0; i < 100; i++) {
+            now += (uint64_t)gap;                                    /* the unit was off / the game stopped for gap s */
+            sdc_clk_load(&c, clock, sdc_tsec_unpack(v, now), now, i * 1000);
+            now += 3;                                                /* 3 s of play (the game's clock runs) */
+            sdc_rtc_advance(clock, 3);
+            v = sdc_tsec_pack(sdc_clk_save(&c, clock, now, i * 1000 + 3));
+        }
+        sdc_rtc_advance(want, (uint64_t)(100 * (gap + 3)));
+        check(!memcmp(clock, want, 5), gap ? "100 cycles 59 s apart: the clock is exactly the time that passed" : "100 cycles with no time between: the clock moved only by the time played");
+        check(sdc_tsec_unpack(v, now) == now, "... and its time is the last save's");
+    }
+    /* the same with nothing played and no time passing: not one second */
+    {
+        uint8_t clock[5] = { 10, 20, 5, 7, 0 }, want[5];
+        memcpy(want, clock, 5);
+        uint32_t v = sdc_tsec_pack(T0 + 31);
+        for (int i = 0; i < 100; i++) {
+            sdc_clk_load(&c, clock, sdc_tsec_unpack(v, T0 + 31), T0 + 31, 5);
+            v = sdc_tsec_pack(sdc_clk_save(&c, clock, T0 + 31, 5));
+        }
+        check(!memcmp(clock, want, 5) && v == sdc_tsec_pack(T0 + 31), "100 save / load cycles in the same second: the clock never moves");
+    }
+    /* a record with the time, left unloaded offline (no Wi-Fi at load and at save): anchored by the last known time */
+    {
+        uint8_t clock[5] = { 0, 0, 1, 1, 0 };
+        uint32_t v = sdc_tsec_pack(T0);
+        const uint64_t last = T0 + 600;                              /* the last time the unit knew (an earlier power-on) */
+        sdc_clk_load(&c, clock, sdc_tsec_unpack(v, last), 0, 100);
+        const uint64_t kept = sdc_clk_save(&c, clock, 0, 400);       /* played 300 s with no time */
+        v = sdc_tsec_pack(kept);
+        check(kept == T0 + 300 && sdc_tsec_unpack(v, last) == T0 + 300, "no time at all: T0 + the time played, read back through the last known time");
+    }
+}
+
+/* 1.1.7: the calendar (the clock page and the server's Date) */
+static void t_civil(void)
+{
+    check(CwlCivil_Unix(2025, 1, 1, 0, 0, 0) == (int64_t)SDC_T_EPOCH && CwlCivil_Unix(1970, 1, 1, 0, 0, 0) == 0, "2025-01-01 and the unix epoch");
+    check(CwlCivil_Unix(2026, 11, 5, 14, 32, 7) == 1793889127ll, "2026-11-05 14:32:07");
+    int y, mo, d, h, mi, s, bad = 0;
+    for (int64_t t = (int64_t)SDC_T_EPOCH; t < (int64_t)SDC_T_EPOCH + 76ll * 366 * 86400; t += 86400 * 7 + 3671) {
+        CwlCivil_Split(t, &y, &mo, &d, &h, &mi, &s);
+        if (CwlCivil_Unix(y, mo, d, h, mi, s) != t || d < 1 || d > CwlCivil_DaysIn(y, mo)) bad++;
+    }
+    check(bad == 0, "every week of 2025..2100 splits and joins back to the same second");
+    CwlCivil_Split(CwlCivil_Unix(2028, 2, 29, 23, 59, 59), &y, &mo, &d, &h, &mi, &s);
+    check(y == 2028 && mo == 2 && d == 29 && h == 23 && mi == 59 && s == 59 && CwlCivil_DaysIn(2028, 2) == 29 && CwlCivil_DaysIn(2100, 2) == 28 && CwlCivil_DaysIn(2026, 2) == 28, "leap years");
+}
+
 static void t_rec(void)
 {
     uint8_t h[0x150];
@@ -161,7 +300,7 @@ static void t_rec(void)
 
 int main(void)
 {
-    t_header(); t_names(); t_sort(); t_rtc(); t_rec();
+    t_header(); t_names(); t_sort(); t_rtc(); t_clock(); t_civil(); t_rec();
     printf("sd_core: %d passed, %d failed\n", passes, fails);
     return fails ? 1 : 0;
 }

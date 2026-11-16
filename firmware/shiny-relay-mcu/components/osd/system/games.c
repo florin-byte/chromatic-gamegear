@@ -141,6 +141,8 @@ static bool OkDelete(const Game_t *g);
 static void RunDelete(const Game_t *g);
 static bool OkShare(const Game_t *g);
 static void RunShare(const Game_t *g);
+static bool OkSaveCloud(const Game_t *g);
+static void RunSaveCloud(const Game_t *g);
 static const Act_t kActs[] = {
     { "PLAY",                  kW_Cart | kW_Lib | kW_Card, OkPlay,   RunPlay   },
     { "STOP  PLAYING",         kW_Lib | kW_Card,           OkStop,   RunStop   },
@@ -149,6 +151,7 @@ static const Act_t kActs[] = {
     { "COPY  TO  CARD",        kW_Lib,                     OkToCard, RunToCard },
     { "WRITE  TO  CARTRIDGE",  kW_Lib | kW_Card,           OkToCart, RunToCart },
     { "SHARE",                 kW_Cart | kW_Lib | kW_Card, OkShare,  RunShare  },   // lane share1: to another Chromatic nearby
+    { "SAVE  TO  MY  GAMES",   kW_Lib,                     OkSaveCloud, RunSaveCloud },   // lane savecloud1: its newest save up to the account
     { "DELETE",                kW_Lib | kW_Card,           OkDelete, RunDelete },
 };
 enum { kActN = sizeof kActs / sizeof kActs[0], kActRows = kRows - 2 };
@@ -189,16 +192,22 @@ typedef struct {
     uint8_t Back;                      // fr1: where B / OK goes from a game, a result: kV_Lib or kV_List
     lv_obj_t *pBg, *pLine1, *pLine2;   // fr1: the whole screen's background and its two lines
     LibRows_t *pLib;                   // fr1: heap while the library shows
-    uint8_t View, Captured, PlayView, Held, Confirm, Act;
+    uint8_t View, Captured, PlayView, Held, Confirm, Act, ActTop;
     int Sel, Top;                      // the list: the selected entry, the first row shown (entry numbers)
     uint8_t SelWhere;                  // 1.1.4: the selected game itself (its place, its number there): entry numbers move when
     int SelI;                          // a place is read again (the card every 3 s, the library), the game does not
     int CoreState;                    // -2 pending, -1 unknown, 0 GB, 1 GG
+    uint8_t Away;                      // 1.1.6: that game not there for now (the nearest one shown, the game still the one wanted)
+    int8_t Pend;                       // 1.1.6: Up / Down pressed while its place was read (applied once it is read)
+    uint8_t Known;                     // 1.1.6: the card's game count last read (KnownCard) on card generation KnownGen: shown
+    int KnownCard;                     // while the card is read again, so its games stay in the list (no READING row, no jump)
+    uint32_t KnownGen;
     uint32_t CacheGen;                 // the card generation the card rows were read on
     int CacheFrom, CacheCount;
     char CardRows[kListRows][SDC_NAME_LEN];
     Game_t *pGame;                     // the game opened (heap while the game / confirm / busy views need it)
     uint32_t LastAsk;
+    uint8_t ReadAsked;                 // 1.1.6: this visit's read of the card's games was taken by the card's task
     char Res[64];                      // a result this page made itself ("ROW1|ROW2", or "ROW1|ROW2|ROW3")
     uint8_t BusyOwn;                   // busy: the job is the card task's (1), a library delete (2) or a stop before a delete (3)
     uint8_t StopPending;              // wait for the explicit stop-end signal
@@ -242,6 +251,7 @@ static void CancelStopReopen(void)
     if (_StopTimer) (void)esp_timer_stop(_StopTimer);
 }
 static OSD_Result_t OnCapture(const Button_t Button, const ButtonState_t State, void *arg);
+static void Move(int dir, int step);
 
 // fr1: a row's place: the panel's seven rows, or over the whole screen a title (row 0), the list's rows (1 ..
 // kFullListRows) and the buttons (the last row)
@@ -384,7 +394,12 @@ static void Look(Where_t *w)
         snprintf(w->kept_title, sizeof w->kept_title, "%s", w->pv.Title);
     }
     Sd_View(&w->sd);
-    if (w->sd.st == kSdSt_Ready || w->sd.st == kSdSt_ReadOnly) w->card = w->sd.games >= 0 ? w->sd.games : -2;
+    if (w->sd.st == kSdSt_Ready || w->sd.st == kSdSt_ReadOnly)
+    {
+        if (w->sd.games >= 0) { w->card = w->sd.games; _Ctx.Known = 1; _Ctx.KnownCard = w->sd.games; _Ctx.KnownGen = Sd_Generation(); }
+        else if (_Ctx.Known && _Ctx.KnownGen == Sd_Generation()) w->card = _Ctx.KnownCard;   // (1.1.6: read again: as it was)
+        else w->card = -2;
+    }
     else w->card = -1;
     const int core = CfDev_FpgaSlotPending() ? -2 : CfDev_FpgaSlot();
     if (_Ctx.CoreState != core) {
@@ -430,8 +445,16 @@ static int Selectable(const Where_t *w, int k) { return k >= 0 && k < Count(w) &
 // selected card game "went" and the cursor moved to the nearest game left, up in CARTRIDGE, and stayed there. Now the
 // selection is the game (its place and its number there): found again at each draw, and kept, not moved, while its
 // place is only being read; moved to the nearest game only when the game is really gone (a card pulled, a delete).
+// 1.1.6 (the same player on 1.1.5: "the menu jumping bug still exists"; unit 2, 1.1.5, seen on its screen): (1) a press
+// while the card was read again went from the list as it was then, with no card games: Down went round to the top, the
+// CARTRIDGE (the read takes longer than the page waits for it, 30 ms, on a card with many games); (2) a card lent for the
+// network's memory (or mounted again) has no state for a moment: "gone", and the nearest game, the CARTRIDGE on a unit
+// with nothing ON CHROMATIC, was remembered for good. Now a press while the game's place is read waits for the read; the
+// nearest game is only shown while the game is not there (Away), and the cursor goes back to it when it is; only the
+// player's own Up / Down changes the game wanted. A card lent is a card being read.
 static void Remember(const Where_t *w)
 {
+    _Ctx.Away = 0;
     if (!Selectable(w, _Ctx.Sel)) { _Ctx.SelWhere = 0; return; }
     const Ent_t e = EntAt(w, _Ctx.Sel);
     _Ctx.SelWhere = e.where; _Ctx.SelI = e.i;
@@ -445,7 +468,8 @@ static int FindSel(const Where_t *w)
 }
 static bool PlaceReading(const Where_t *w, uint8_t where)
 {
-    if (where == kW_Card) return w->card == -2 || ((w->sd.op == kSdOp_Mount || w->sd.op == kSdOp_Refresh) && w->card >= 0);
+    // (mounted again with no state yet: reading too, unless the game had gone already: a card out is asked every 3 s)
+    if (where == kW_Card) return w->card == -2 || Sd_Lent() || ((w->sd.op == kSdOp_Mount || w->sd.op == kSdOp_Refresh || w->sd.op == kSdOp_Look) && (w->card >= 0 || !_Ctx.Away));
     if (where == kW_Lib) return w->lib == -2 || w->lib == -3;
     return false;
 }
@@ -454,16 +478,18 @@ static bool PlaceReading(const Where_t *w, uint8_t where)
 static void FillCard(const Where_t *w, int from)
 {
     if (_Ctx.CacheFrom == from && _Ctx.CacheGen == Sd_Generation() && _Ctx.CacheCount == w->card) return;
+    char rows[kListRows][SDC_NAME_LEN];             // (1.1.6: all the rows or none: a busy card mid-way kept half a window)
     for (int i = 0; i < kListRows; i++)
     {
         const int at = from + i;
-        if (at >= w->card) { _Ctx.CardRows[i][0] = 0; continue; }
+        if (at >= w->card) { rows[i][0] = 0; continue; }
         sdc_rec_t r;
         const int e = SdLib_Get((uint32_t)at, &r);
-        if (e == -2) return;                       // busy: the next draw tries again
-        if (e) { snprintf(_Ctx.CardRows[i], sizeof _Ctx.CardRows[i], "?"); continue; }
-        snprintf(_Ctx.CardRows[i], sizeof _Ctx.CardRows[i], "%s", r.title);
+        if (e == -2) return;                       // busy: the next draw tries again (the rows read before still shown)
+        if (e) { snprintf(rows[i], sizeof rows[i], "?"); continue; }
+        snprintf(rows[i], sizeof rows[i], "%s", r.title);
     }
+    memcpy(_Ctx.CardRows, rows, sizeof rows);
     _Ctx.CacheFrom = from; _Ctx.CacheGen = Sd_Generation(); _Ctx.CacheCount = w->card;
 }
 // a game's name as the page draws it: each space doubled (the OSD font's space is one pixel: "SHINY  KART")
@@ -535,6 +561,8 @@ static int OpenEnt(const Where_t *w, int k)
     }
     _Ctx.pGame = g;
     _Ctx.Act = 0;
+    _Ctx.ActTop = 0;
+    NW_SaveCloudForget();                                         // lane savecloud1: whether this game has a save is asked afresh
     return 0;
 }
 
@@ -675,6 +703,19 @@ static bool OkShare(const Game_t *g)
     if (g->where == kW_Lib) return g->uid != 0;
     return (g->flags & SDC_F_PLAYABLE) != 0;
 }
+// lane savecloud1 (owner 2026-11-08: manual only, only a game kept ON CHROMATIC): the game's newest save up to the paired
+// account's My games. Offered when no game is playing and the game has save memory. Not paired or no Wi-Fi saved: the row is
+// there and pressing it says what is missing (a player on Wi-Fi who had never paired saw no row and no reason, 2026-11-09).
+// Ready: only when a save is stored. The job (kSdJob_SaveToCloud) stops the link, sends, and brings the link back; its words
+// come from cf_sup.c.
+static bool OkSaveCloud(const Game_t *g)
+{
+    if (g->where != kW_Lib || !g->uid || !g->save) return false;
+    if (Playing()) return false;
+    if (!NW_SaveCloudReady()) return true;
+    return NW_SaveCloudHas(g->uid) == 1;
+}
+static void RunSaveCloud(const Game_t *g) { (void)Job(kSdJob_SaveToCloud, g, 0); }
 static void RunShare(const Game_t *g)
 {
     // (the title goes to the other unit as is; the cart's own is read from its header at SEND)
@@ -687,11 +728,12 @@ static void RunShare(const Game_t *g)
     else if (e != kShare_Ok) Result("NOT  NOW|SOMETHING  ELSE  IS|RUNNING:  WAIT");
 }
 
-// the actions a game shows now, in table order: their table numbers into o (up to kActRows)
-static int Acts(const Game_t *g, uint8_t o[kActRows])
+// the actions a game shows now, in table order: their table numbers into o (up to kActN; the page shows kActRows of them at a
+// time and follows the selection: savecloud1 made six possible, with a card and a cartridge in)
+static int Acts(const Game_t *g, uint8_t o[kActN])
 {
     int n = 0;
-    for (int a = 0; a < kActN && n < kActRows; a++)
+    for (int a = 0; a < kActN && n < kActN; a++)
         if ((kActs[a].where & g->where) && kActs[a].ok(g)) o[n++] = (uint8_t)a;
     return n;
 }
@@ -700,8 +742,12 @@ static void AskLook(void)
 {
     const uint32_t now = (uint32_t)(NowMs());
     if (_Ctx.LastAsk && now - _Ctx.LastAsk < 3000) return;
+    // 1.1.6 (owner: "why does it need to read the sd card so often"): the page's first ask reads the card's games again;
+    // then every 3 s only whether the card is still there (one card command), its games read again only when a card went
+    // in (the unit's own adds and deletes read them already)
+    const int op = _Ctx.ReadAsked ? kSdOp_Look : kSdOp_Mount;
     _Ctx.LastAsk = now ? now : 1;
-    if (Sd_Busy() == kSdOp_None) (void)Sd_Ask(kSdOp_Mount, NULL);   // (a mounted card: asked whether it is still there, the list refreshed)
+    if (Sd_Busy() == kSdOp_None && Sd_Ask(op, NULL) == 0 && op == kSdOp_Mount) _Ctx.ReadAsked = 1;   // (a mounted card: asked whether it is still there, the list refreshed)
 }
 
 static void FreeLine(const Where_t *w, char *b, size_t n)
@@ -724,6 +770,7 @@ static const char *JobWord(int job)
     case kSdJob_CardToLib:
     case kSdJob_CartToLib:  return "KEEPING  IT";
     case kSdJob_LibToCard:  return "COPYING  TO  CARD";
+    case kSdJob_SaveToCloud: return "SAVING  ONLINE";
     default:                return "WORKING";
     }
 }
@@ -1169,7 +1216,8 @@ static OSD_Result_t Draw(lv_obj_t *const pScreen)
         // fr2: the card is asked once, when the library opens: the slot is inside the unit (no card is pulled while the menu
         // shows), and games that arrive (Wi-Fi, SHARE, a job) refresh the library themselves. Asking every 3 s (AskLook, as
         // the panel's list does) walked the whole card each time: READING on screen, the card busy, the battery
-        if (_Ctx.pLib && !_Ctx.pLib->asked) { _Ctx.LastAsk = 0; AskLook(); _Ctx.pLib->asked = 1; }
+        // (1.1.12 merge: this one ask is a read of the card's games, whatever the panel's list asked before in this visit)
+        if (_Ctx.pLib && !_Ctx.pLib->asked) { _Ctx.LastAsk = 0; _Ctx.ReadAsked = 0; AskLook(); _Ctx.pLib->asked = 1; }
         LibDraw(pScreen, &w);
         break;
     case kV_Main:
@@ -1216,15 +1264,22 @@ static OSD_Result_t Draw(lv_obj_t *const pScreen)
         const int n = Count(&w);
         const int found = FindSel(&w);
         bool parked = false;                       // the selected game's place is being read: the cursor waits for it
-        if (found >= 0) _Ctx.Sel = found;
+        if (found >= 0)
+        {
+            _Ctx.Sel = found; _Ctx.Away = 0;
+            if (_Ctx.Pend) { const int p = _Ctx.Pend; _Ctx.Pend = 0; Move(p > 0 ? 1 : -1, p > 0 ? p : -p); }   // (1.1.6: pressed during the read)
+        }
         else if (_Ctx.SelWhere && PlaceReading(&w, _Ctx.SelWhere)) parked = true;
         else if (!Selectable(&w, _Ctx.Sel) || _Ctx.SelWhere)
         {
-            // the selected game went (a card pulled, a delete): the nearest one, else the first
+            // the selected game not there (a card pulled, lent, a delete): the nearest one shown, else the first; the game
+            // stays the one wanted (1.1.6), the cursor goes back to it when it is there again
             int best = -1;
-            for (int d = 0; d < n && best < 0; d++) { if (Selectable(&w, _Ctx.Sel - d)) best = _Ctx.Sel - d; else if (Selectable(&w, _Ctx.Sel + d)) best = _Ctx.Sel + d; }
+            // (from past the list's end too: a list grown shorter)
+            for (int d = 0; best < 0 && (_Ctx.Sel - d >= 0 || _Ctx.Sel + d < n); d++) { if (Selectable(&w, _Ctx.Sel - d)) best = _Ctx.Sel - d; else if (Selectable(&w, _Ctx.Sel + d)) best = _Ctx.Sel + d; }
             _Ctx.Sel = best;
-            Remember(&w);
+            _Ctx.Pend = 0;
+            if (_Ctx.SelWhere) _Ctx.Away = 1; else Remember(&w);
         }
         const int at = _Ctx.Sel < 0 ? 0 : _Ctx.Sel;
         if (!parked)
@@ -1262,9 +1317,14 @@ static OSD_Result_t Draw(lv_obj_t *const pScreen)
     case kV_Game:
     {
         const Game_t *g = _Ctx.pGame;
-        uint8_t a[kActRows];
+        uint8_t a[kActN];
         const int na = Acts(g, a);
         if (_Ctx.Act >= na) _Ctx.Act = na ? (uint8_t)(na - 1) : 0;
+        // (more actions than rows: the window follows the selection; savecloud1)
+        if (_Ctx.ActTop > _Ctx.Act) _Ctx.ActTop = _Ctx.Act;
+        if (_Ctx.Act >= _Ctx.ActTop + kActRows) _Ctx.ActTop = (uint8_t)(_Ctx.Act - kActRows + 1);
+        if (na <= kActRows) _Ctx.ActTop = 0;
+        else if (_Ctx.ActTop > na - kActRows) _Ctx.ActTop = (uint8_t)(na - kActRows);
         if (g->where == kW_Cart) snprintf(b1, sizeof b1, "CARTRIDGE");
         else if (g->where == kW_Lib) { GameBytes(b3, sizeof b3, g->size); snprintf(b1, sizeof b1, g->size ? "ON  CHROMATIC  %s" : "ON  CHROMATIC", b3); }
         else if (g->flags & SDC_F_PLAYABLE) { GameBytes(b3, sizeof b3, g->size); snprintf(b1, sizeof b1, "CARD  %.16s", b3); }
@@ -1275,7 +1335,7 @@ static OSD_Result_t Draw(lv_obj_t *const pScreen)
         LineM(pScreen, 1, false, CfDev_FpgaSlot() == 1 ? "" : b1, 1);
         for (int r = 0; r < kActRows; r++)
         {
-            if (r < na) LineM(pScreen, 2 + r, r == _Ctx.Act, kActs[a[r]].label, 0);
+            if (_Ctx.ActTop + r < na) LineM(pScreen, 2 + r, _Ctx.ActTop + r == _Ctx.Act, kActs[a[_Ctx.ActTop + r]].label, 0);
             else LineM(pScreen, 2 + r, false, (r == 0 && na == 0) ? "NOTHING  TO  DO  NOW" : "", 0);
         }
         break;
@@ -1364,6 +1424,13 @@ static void Move(int dir, int step)
 {
     Where_t w;
     Look(&w);
+    // 1.1.6: the game's place being read (the list has no games there now): the press waits for the read
+    if (_Ctx.SelWhere && FindSel(&w) < 0 && PlaceReading(&w, _Ctx.SelWhere))
+    {
+        const int p = _Ctx.Pend + dir * step;
+        _Ctx.Pend = (int8_t)(p > 20 ? 20 : p < -20 ? -20 : p);
+        return;
+    }
     const int n = Count(&w);
     if (n <= 0) return;
     int k = _Ctx.Sel < 0 ? 0 : _Ctx.Sel;
@@ -1403,7 +1470,7 @@ static OSD_Result_t OnCapture(const Button_t Button, const ButtonState_t State, 
         break;
     case kV_Game:
     {
-        uint8_t a[kActRows];
+        uint8_t a[kActN];
         const int na = Acts(_Ctx.pGame, a);
         if (Button == kButton_Up && na) _Ctx.Act = (uint8_t)((_Ctx.Act + na - 1) % na);
         else if (Button == kButton_Down && na) _Ctx.Act = (uint8_t)((_Ctx.Act + 1) % na);
@@ -1473,23 +1540,10 @@ OSD_Result_t Games_OnButton(const Button_t Button, const ButtonState_t State, vo
         if (_Ctx.InTab) { LibOpen(); return kOSD_Result_Ok; }   // (fr1: the GAMES tab opens the library)
         Where_t w;
         Look(&w);
-        if (!Selectable(&w, _Ctx.Sel)) { _Ctx.Sel = -1; for (int k = 0; k < Count(&w); k++) if (Selectable(&w, k)) { _Ctx.Sel = k; break; } }
-        if (Playing())
-            for (int i = 0; i < w.card; i++)
-            {
-                sdc_rec_t rec;
-                if (SdLib_Get((uint32_t)i, &rec)) continue;
-                Game_t g = { .where = kW_Card };
-                snprintf(g.path, sizeof g.path, "%s", rec.path);
-                if (!IsPlaying(&g)) continue;
-                for (int k = 0; k < Count(&w); k++)
-                {
-                    const Ent_t e = EntAt(&w, k);
-                    if (e.kind == kE_Game && e.where == kW_Card && e.i == i) { _Ctx.Sel = k; break; }
-                }
-                break;
-            }
+        // 1.1.6 (owner): the list opens at its top, the first game, not where it was left
+        _Ctx.Sel = -1; for (int k = 0; k < Count(&w); k++) if (Selectable(&w, k)) { _Ctx.Sel = k; break; }
         Remember(&w);
+        _Ctx.Pend = 0;
         _Ctx.Top = 0;
         _Ctx.CacheFrom = -1;
         SetView(kV_List);
@@ -1508,7 +1562,9 @@ OSD_Result_t Games_OnTransition(void *arg)
     _DrawnView = 0xFF;
     if (_Ctx.PlayView) { (void)Play_OnTransition(NULL); _Ctx.PlayView = 0; }
     if (_Ctx.Held) { NW_LibHold(false); _Ctx.Held = 0; }
+    NW_SaveCloudForget();
     _Ctx.LastAsk = 0;
+    _Ctx.ReadAsked = 0;
     return kOSD_Result_Ok;
 }
 

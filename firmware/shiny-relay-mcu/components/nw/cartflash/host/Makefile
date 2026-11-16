@@ -9,7 +9,7 @@ SAMEBOY ?= ../../../../../third_party/SameBoy
 INC = -I$(CF) -I$(NW) -I$(TOOLS) -I$(SAMEBOY)/build/include/sameboy -I$(SAMEBOY)
 SRC = cf_sim.c cf_cart.c $(CF)/cf_esp.c $(CF)/cf_sha256.c $(CF)/cf_usb.c $(CF)/cf_chips.c $(NW)/nw_esp.c $(TOOLS)/nw_fpga_model.c
 
-all: sm83 cf_sim cf_fetch_test cf_install_test cf_ctr_test cf_wire_check cf_bps_test cf_ota_test cf_fota_test cf_sgz_test cf_sgz_test_unit cf_lib_test cf_rc_win_test cf_keep_test cf_pack_test cf_share_test cf_hdr_test cf_pad_test cf_zc_test
+all: sm83 cf_sim cf_fetch_test cf_install_test cf_ctr_test cf_wire_check cf_bps_test cf_ota_test cf_fota_test cf_sgz_test cf_sgz_test_unit cf_lib_test cf_rc_win_test cf_keep_test cf_pack_test cf_share_test cf_hdr_test cf_pad_test cf_zc_test cf_sleep_test cf_sup_test
 
 sm83:
 	sh ../sm83/make_sm83.sh
@@ -61,6 +61,14 @@ cf_lib_test: cf_lib_test.c $(CF)/cf_lib.c $(CF)/cf_lib.h $(CF)/cf_esp.c
 
 cf_keep_test: cf_keep_test.c $(CF)/cf_rc_keep.inc
 	$(CC) $(CFLAGS) $(INC) -o $@ cf_keep_test.c
+
+# lane savefix1: the light-sleep timer wake while a game plays from RAM, and the pending-save keep-awake
+cf_sleep_test: cf_sleep_test.c $(CF)/cf_rc_sleep.h ../../../../main/pwrmgr_logic.h
+	$(CC) $(CFLAGS) $(SLEEP_INC) $(INC) -I../../../../main -o $@ cf_sleep_test.c
+
+# lane savecloud1: SAVE TO MY GAMES's decisions (cf_sup.c) against a mock flash and a mock server
+cf_sup_test: cf_sup_test.c $(CF)/cf_sup.c $(CF)/cf_sup.h
+	$(CC) $(CFLAGS) $(INC) -o $@ cf_sup_test.c $(CF)/cf_sup.c -lz
 
 cf_hdr_test: cf_hdr_test.c $(CF)/cf_rc_hdr.inc
 	$(CC) $(CFLAGS) $(INC) -o $@ cf_hdr_test.c

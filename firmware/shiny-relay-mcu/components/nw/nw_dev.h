@@ -75,7 +75,8 @@ void NW_CartButton(int A);
 // SYSTEM > UPDATE (1.1.0): Shiny Relay's own update over Wi-Fi (cartflash/cf_ota.h OV_*, same numbers).
 // Kind -1: this build has no update over Wi-Fi.
 enum { kNwFv_Menu, kNwFv_Busy, kNwFv_Download, kNwFv_Ready, kNwFv_Switch, kNwFv_Result,
-       kNwFv_Fpga };   // fpgacomp1: the FPGA install / the recovery design (Title, Note "ROW1|ROW2", Pct; -1 = no %)
+       kNwFv_Fpga,     // fpgacomp1: the FPGA install / the recovery design (Title, Note "ROW1|ROW2", Pct; -1 = no %)
+       kNwFv_Offer };  // 1.1.12, SYSTEM > CUSTOM: a custom build waits on the server (Name, Version; A downloads it)
 typedef struct {
     int Kind;
     char Title[24];
@@ -84,8 +85,12 @@ typedef struct {
     char Running[16];   // always the running one
     int Pct;            // kNwFv_Download
     int ReadyWaits;     // kNwFv_Menu: an update is in the slot (UPDATE READY)
+    int Custom;         // 1.1.12: what is shown (or waits in the slot) is a custom build, not a release
+    char Name[24];      // the custom build's project name ("" not known)
 } NwFwView_t;
 void NW_FwView(NwFwView_t *Out);
+// 1.1.12, SYSTEM > CUSTOM: check for the custom build this unit's account chose (the update machine's second channel)
+void NW_FwCustom(void);
 // SYSTEM > PLAY (1.1.0, FPGA 18.30): the game kept in this Chromatic, played with no cartridge
 // (cartflash/cf_rc_dev.c). Kind -1: not in this build.
 enum { kNwPv_None, kNwPv_Ready, kNwPv_Loading, kNwPv_Playing, kNwPv_Result, kNwPv_NoFpga };
@@ -125,6 +130,11 @@ int  NW_GgSideDone(int *Code);
 int  NW_GgReady(void);
 int  NW_GgActive(void);
 int  NW_Paired(void);
+// lane savecloud1 (SAVE TO MY GAMES): 1 = paired and a Wi-Fi network saved; whether the kept game has a stored save (1 yes,
+// 0 none, -1 not known yet: it is being looked up); the answer forgotten (a game's page opens / closes)
+int  NW_SaveCloudReady(void);
+int  NW_SaveCloudHas(uint32_t Uid);
+void NW_SaveCloudForget(void);
 void NW_GgOwnJob(int On);        // lane mygames1: the card job running is GET GAMES's (its end reopens GET GAMES, not GAMES)
 int  NW_GgOwnsJob(void);            // lane mygames1: 1 = this unit is paired to a Shiny Gen account (MY GAMES)
 void NW_GgOpenMenu(void);

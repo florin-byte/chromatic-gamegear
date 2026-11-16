@@ -44,6 +44,7 @@
 #include "cf_fota.h"
 #include "cf_proto.h"
 #include "cf_rc_dev.h"
+#include "cf_rc_sleep.h"
 int CfDev_FpgaRecovery(void);   /* cf_dev.c: the recovery design runs (no RAM cart in it) */
 #include "nw_dev.h"
 #include "esp_timer.h"
@@ -54,6 +55,7 @@ int CfDev_FpgaRecovery(void);   /* cf_dev.c: the recovery design runs (no RAM ca
 #define CF_INST_WRITABLE_RC 2031616u   /* the ModRetro cart: 2 MiB less its protected top block (cf_install.h CF_INST_WRITABLE) */
 #include "cwl.h"
 #include "cwl_online.h"
+#include "cwl_time.h"
 int CfDev_FlashReadMm(uint32_t addr, uint8_t *b, uint32_t n);   /* cf_dev.c: the flash through mapped windows */
 void CfDev_FlashMmDrop(void);
 uint32_t cf_crc32(uint32_t crc, const uint8_t *b, uint32_t n);   /* cf_esp.c: the table one */
@@ -470,10 +472,12 @@ int CfRc_GameAreaErase(uint32_t a, uint32_t n)
     }
     return 0;
 }
+/* savefast1: a save's pieces go through one ring (a RESET costs 40 ms: per 2 KiB piece that was the 22 KB/s of a save) */
+static int _GaRingOpen;
 int CfRc_GameAreaProg(uint32_t a, const uint8_t *b, uint32_t n)
 {
     if (!ga_in(a, n)) return -10;
-    int e = CfRc_RingBegin();
+    int e = (_GaRingOpen && n <= CF_XS_RING - (_Pos % CF_XS_RING)) ? 0 : CfRc_RingBegin();
     for (uint32_t o = 0; o < n && !e; o += 4096u) e = CfRc_FlashProg(a + o, b + o, n - o < 4096u ? n - o : 4096u);
     return e;
 }
@@ -509,7 +513,7 @@ int CfRc_GameAreaCopy(uint32_t a, uint32_t pa, uint32_t n, uint32_t *crc) { retu
 #define RC_STORE_SZ  0x10000u
 #define RC_MAGIC     0x31534352u        /* "RCS1" */
 #define RC_ENTRIES   15
-#define RC_QUIET_MS  1500u
+#define RC_QUIET_MS  200u              /* savefast1: was 1500: a game that writes only when it saves is copied at once */
 #define RC_MAX_MS    10000u           /* a game that writes its save RAM all the time (Shiny Kart's counters): a copy at least this often */
 
 typedef struct {
@@ -524,6 +528,8 @@ typedef struct {
 typedef struct {
     uint32_t magic, seq;
     rc_ent_t e[RC_ENTRIES];
+    uint32_t tm[RC_ENTRIES];            /* 1.1.7: when each entry's clock was true (unix s). After the entries so the index of 1.1.6
+                                           (shorter, erased flash after it: 0xFFFFFFFF) still loads and 1.1.6 still reads a newer one */
 } rc_index_t;
 typedef struct {
     uint32_t magic;
@@ -623,6 +629,7 @@ static int ent_for(uint32_t crc, uint32_t size, int make)
             if (!ok) continue;
             for (int i = 0; i < RC_ENTRIES; i++) if (!_Ix.e[i].used) {
                 memset(&_Ix.e[i], 0, sizeof _Ix.e[i]);
+                _Ix.tm[i] = 0;
                 _Ix.e[i].used = 1; _Ix.e[i].crc = crc; _Ix.e[i].size = size; _Ix.e[i].sect = (uint16_t)s0; _Ix.e[i].nsect = need;
                 return i;
             }
@@ -634,6 +641,26 @@ static int ent_for(uint32_t crc, uint32_t size, int make)
         printf("rc: save store full: the save of game %08lx goes\n", (unsigned long)_Ix.e[old].crc);
         _Ix.e[old].used = 0;
     }
+}
+
+/* ---- 1.1.7: a game's clock from its load to its saves (sdc_clk_*, sd_core.c; the rules and their tests are there) */
+static sdc_clk_t _Clk;
+static int64_t clk_up(void) { return esp_timer_get_time() / 1000000; }
+static uint64_t ix_tm(int ent) { return ent >= 0 && _Ix.tm[ent] != 0xFFFFFFFFu ? _Ix.tm[ent] : 0; }
+/* a game's clock as loaded: rt from its save, t_saved when it was true (0 = not known); the clock caught up when both times are known */
+static void clk_loaded(uint8_t rt[5], uint64_t t_saved)
+{
+    const uint64_t now = Sd_UnixTime();
+    const int adv = sdc_clk_load(&_Clk, rt, t_saved, now, clk_up());
+    printf("rc: clock: saved at %llu, now %llu: %s\n", (unsigned long long)t_saved, (unsigned long long)now,
+           adv ? "caught up" : now ? "nothing to catch up" : t_saved ? "no real time yet: the clock is kept as it was and the gap is caught up later" : "no real time");
+}
+/* the live clock rt as a save keeps it (caught up if the load could not), and the real time it is true at (0 = not known) */
+static uint64_t clk_keep(uint8_t rt[5])
+{
+    const uint64_t t = sdc_clk_save(&_Clk, rt, Sd_UnixTime(), clk_up());
+    printf("rc: clock: kept, true at %llu\n", (unsigned long long)t);
+    return t;
 }
 
 /* 1.1.0: after an update to the other slot the store is still next to the old one: copy it over */
@@ -769,7 +796,12 @@ static int save_copy_store(void)
     if (_P.rtc && CfRc_Op(CF_RC_O_RRTC, 0, 0, 0, 200) == 0) {
         const uint32_t r = CfRc_Crc();
         const uint8_t rt[5] = { (uint8_t)(r & 0x3F), (uint8_t)((r >> 8) & 0x3F), (uint8_t)((r >> 16) & 0x1F), (uint8_t)(r >> 24), _St[16] };
-        if (memcmp(rt, e->rtc, 5)) { memcpy(e->rtc, rt, 5); ix = 1; }
+        uint8_t kp[5];
+        memcpy(kp, rt, 5);
+        const uint64_t tk = clk_keep(kp);                 /* (1.1.7: caught up if the load could not; and the time it is true at) */
+        if (memcmp(kp, e->rtc, 5)) { memcpy(e->rtc, kp, 5); ix = 1; }
+        const int ei = (int)(e - _Ix.e);
+        if (ei >= 0 && ei < RC_ENTRIES && tk && (uint32_t)tk != _Ix.tm[ei]) { _Ix.tm[ei] = (uint32_t)tk; ix = 1; }
     }
     if (crc != e->dcrc) { e->dcrc = crc; ix = 1; }
     if (ix && index_save()) return -1;
@@ -924,6 +956,7 @@ static void core_back(const char *why)
 }
 static int play_now(void)
 {
+    (void)CwlTime_WaitForLoad(3000);              /* 1.1.7: a clock game starts with the real time when Wi-Fi is joining (up to 3 s), else without it */
     if (_Src == 2) return play_sd();
     if (_Src == 3) return play_lib();
     const bool held = load_quiet_begin("play");
@@ -1031,6 +1064,7 @@ static int play_now_inner(void)
     }
     if (!inram && !zk && kg->crc && crc != kg->crc) { cfg_now(0); result(kNwPv_Result, "THE  GAME  WAS", "REPLACED");   /* (a USB install wrote the slot) */ if (_Src == 0) game_store(0); return -1; }
     _P.crc = crc;
+    memset(&_Clk, 0, sizeof _Clk);
     /* its save: from the store, else blank */
     {
         static uint8_t b[1024];
@@ -1046,9 +1080,10 @@ static int play_now_inner(void)
             static uint32_t lru;
             _Ix.e[_P.ent].lru = ++lru + _Ix.seq;
             if (!have) (void)index_save();
-            if (_P.rtc && !have) (void)CfRc_Op(CF_RC_O_RRTC, 0, 0, 1, 200);   /* a new save: the clock from 0 */
-            if (_P.rtc && have) {
-                const uint8_t *r = _Ix.e[_P.ent].rtc;
+            if (_P.rtc) {                                  /* a new save: the clock from 0; else as it was left, caught up to now (1.1.7) */
+                uint8_t r[5] = { 0 };
+                if (have) memcpy(r, _Ix.e[_P.ent].rtc, 5);
+                clk_loaded(r, have ? ix_tm(_P.ent) : 0);
                 (void)CfRc_Op(CF_RC_O_RRTC, (uint32_t)r[0] | (uint32_t)r[1] << 8 | (uint32_t)r[2] << 16, (uint32_t)r[3] | (uint32_t)r[4] << 8, 1, 200);
             }
         }
@@ -1090,6 +1125,8 @@ static int play_now_inner(void)
  */
 #define RC_SD_CHUNK    8192u
 #define RC_SD_RETRY_MS 8000u
+static volatile int _SaveBusy;
+static volatile int64_t _PollUs;     /* lane savefix1: esp_timer time (runs through light sleep) of the last save poll */
 #define RC_ENT_PENDING 2u                /* rc_ent_t.used: a save the card has not got yet */
 static char    _SdPath[SDC_PATH_MAX];
 /* (_Src, above: the game playing / asked for: 0 kept (flash), 1 in RAM (Wi-Fi), 2 the card) */
@@ -1157,11 +1194,11 @@ static int sd_save_load(uint8_t *buf, uint8_t *chk, FIL *f)
         const uint32_t fl = ssz - _P.sav_size >= 48u ? 48u : 44u;
         if (Sd_Read(f, _P.sav_size, buf, fl, &got) == 0 && got == fl && sdc_rtc_get(buf, fl, rt, &t_saved) == 0) _Sv.have = 1;
     }
-    if (src == 2) { memcpy(rt, _Ix.e[ent].rtc, 5); _Sv.have = 1; }
+    if (src == 2) { memcpy(rt, _Ix.e[ent].rtc, 5); t_saved = ix_tm(ent); _Sv.have = 1; }
     if (src == 1) Sd_Close(f);
+    memset(&_Clk, 0, sizeof _Clk);
     if (_P.rtc) {
-        const uint64_t now = Sd_UnixTime();
-        if (_Sv.have && now && t_saved && now > t_saved) sdc_rtc_advance(rt, now - t_saved);   /* the time it spent on the card */
+        clk_loaded(rt, _Sv.have ? t_saved : 0);                  /* (1.1.7: the time it spent on the card, if the real time is known) */
         (void)CfRc_Op(CF_RC_O_RRTC, (uint32_t)rt[0] | (uint32_t)rt[1] << 8 | (uint32_t)rt[2] << 16, (uint32_t)rt[3] | (uint32_t)rt[4] << 8, 1, 200);
     }
     _Sv.crc = src ? crc : 0;
@@ -1189,8 +1226,10 @@ static int sd_save_card(uint8_t *a, uint32_t crc_want, const uint8_t rt[5])
         e = Sd_WriteAt(w, o, a, k);
     }
     if (!e && _P.rtc) {
-        uint8_t ft[SDC_RTC_FOOTER];
-        sdc_rtc_put(ft, rt, Sd_UnixTime());
+        uint8_t ft[SDC_RTC_FOOTER], kp[5];
+        memcpy(kp, rt, 5);
+        const uint64_t tk = clk_keep(kp);                       /* (1.1.7: the real time, or the last known one plus the time played) */
+        sdc_rtc_put(ft, kp, tk);
         e = Sd_WriteAt(w, _P.sav_size, ft, sizeof ft);
     }
     if (!e && crc != crc_want) e = -6;                  /* (the game wrote while it was copied: the next copy has it) */
@@ -1256,7 +1295,10 @@ static int save_copy_sd(void)
         _P.ent = ent_for(_P.crc, _P.sav_size, 1);
         if (_P.ent >= 0) {
             if (save_copy_store() == 0) {
-                memcpy(_Ix.e[_P.ent].rtc, rt, 5);
+                uint8_t kp[5];
+                memcpy(kp, rt, 5);
+                _Ix.tm[_P.ent] = (uint32_t)clk_keep(kp);
+                memcpy(_Ix.e[_P.ent].rtc, kp, 5);
                 _Ix.e[_P.ent].used = RC_ENT_PENDING;
                 (void)index_save();
             }
@@ -1436,8 +1478,11 @@ static struct {
 } _LibOp;
 enum { RC_LIB_OPEN = 1, RC_LIB_DEL, RC_LIB_ADD, RC_LIB_MIGRATE, RC_LIB_FMT, RC_LIB_END,
        RC_LIB_TO_SD, RC_LIB_TO_STAGE, RC_LIB_SAVE_CARD, RC_LIB_SAVE_STAGE,   /* lane ui110dev: SYSTEM > GAMES's copies */
-       RC_LIB_SHOPEN, RC_LIB_SVPUT };                                        /* lane share1 */
+       RC_LIB_SHOPEN, RC_LIB_SVPUT,                                          /* lane share1 */
+       RC_LIB_SVPROBE, RC_LIB_NETCLOSE };                                    /* lane savecloud1 */
 static cf_lib_ent_t _ShEnt;              /* lane share1: the entry a share reads (RC_LIB_SHOPEN) */
+/* lane savecloud1: SYSTEM > GAMES asks whether a kept game has a stored save (st: 0 not asked, 1 asked, 2 none, 3 yes) */
+static struct { uint32_t uid; volatile int st; } _SvProbe;
 static cf_lib_save_t _ShSv;
 static cf_lib_save_t _LibSv;             /* the playing game's save as loaded / last written */
 static int _LibLoad = 1;                 /* 1 (default): a container read from the FPGA flash by FREAD (its windows crc32-checked by the FPGA); 0 (lib fast fcopy): FCOPY into PSRAM scratch, then RREADs, which with the core held now and then fill a window a word late (unit 1 2026-10-22: Crystal from the library 2 of 10 that way, 10 of 10 by FREAD) */
@@ -1814,8 +1859,11 @@ static int play_lib_go(const cf_lib_ent_t *ep, uint8_t *hdr)
         }
         heap_caps_free(b); heap_caps_free(chk);
         if (er) { cfg_now(0); result(kNwPv_Result, "LOADING  FAILED", "TRY  AGAIN"); return -1; }
-        if (src == 1) memcpy(rt, _LibSv.rtc, 5);
-        if (src == 2) memcpy(rt, _Ix.e[ent].rtc, 5);
+        uint64_t t_saved = 0;
+        if (src == 1) { memcpy(rt, _LibSv.rtc, 5); t_saved = sdc_tsec_unpack(_LibSv.tsec, CwlTime_Anchor()); }
+        if (src == 2) { memcpy(rt, _Ix.e[ent].rtc, 5); t_saved = ix_tm(ent); }
+        memset(&_Clk, 0, sizeof _Clk);
+        if (_P.rtc) clk_loaded(rt, t_saved);                /* 1.1.7: caught up by the time it spent in the library */
         if (_P.rtc) (void)CfRc_Op(CF_RC_O_RRTC, (uint32_t)rt[0] | (uint32_t)rt[1] << 8 | (uint32_t)rt[2] << 16, (uint32_t)rt[3] | (uint32_t)rt[4] << 8, 1, 200);
         _Sv.crc = src ? scrc : 0;
         memcpy(_Sv.rtc, rt, 5);
@@ -1829,6 +1877,7 @@ static int play_lib_go(const cf_lib_ent_t *ep, uint8_t *hdr)
     vTaskDelay(pdMS_TO_TICKS(50));
     if (cfg_now(CF_RC_A_ON)) { result(kNwPv_Result, "IT  DID  NOT  START", "TRY  AGAIN"); return -1; }
     _P.pend = 0; _P.saves = 0;
+    if (_P.battery && _P.sav_size && _L) (void)cf_lib_save_prepare(_L, e.uid);   /* savefast1: the first save has no erase to wait for */
     _P.st = kNwPv_Playing;
     OSD_SetVisiblityState(false);              /* (m110: the core restarted: the menu is closed) */
     printf("rc: playing %s from the library (mapper %u, %u ROM banks, %u RAM banks%s) with no cartridge\n", e.title, _P.mbc, _P.rom_banks, _P.ram_banks, _P.rtc ? ", clock" : "");
@@ -1861,8 +1910,14 @@ static int save_copy_lib(void)
     const int changed = crc != _Sv.crc || (_P.rtc && _SdStopping && memcmp(rt, _Sv.rtc, 5));
     if (!changed && !_Sv.fail) { _P.saves++; _P.last_save = now; return 0; }
     const int64_t t0 = esp_timer_get_time();
-    e = (!_L && lib_open()) ? CF_LIB_E_NOAREA : cf_lib_save_put(_L, _LibUid, _P.sav_size, rt, lib_sv_get, NULL);
+    uint8_t kp[5];
+    memcpy(kp, rt, 5);
+    const uint64_t tk = clk_keep(kp);                               /* the real time, or the last known one plus the time played */
+    e = (!_L && lib_open()) ? CF_LIB_E_NOAREA : 0;              /* (the clock in whole seconds: no rounding, no drift) */
+    if (!e) { _GaRingOpen = CfRc_RingBegin() == 0; e = cf_lib_save_put_t(_L, _LibUid, _P.sav_size, kp, sdc_tsec_pack(tk), lib_sv_get, NULL); _GaRingOpen = 0; }
     if (e == 0) {
+        printf("rc: lib: save reached flash %lu ms after the game's first write, %lld ms for the flash\n", (unsigned long)(xTaskGetTickCount() * portTICK_PERIOD_MS - _P.pend_first), (long long)((esp_timer_get_time() - t0) / 1000));
+        (void)cf_lib_save_prepare(_L, _LibUid);          /* savefast1: the next save has no erase to wait for */
         /* the bytes the game may have written meanwhile: the next copy has them (the journal has a whole save either way) */
         printf("rc: lib: save in the library (%lu bytes, crc %08lx, %lld ms)\n", (unsigned long)_P.sav_size, (unsigned long)crc, (long long)((esp_timer_get_time() - t0) / 1000));
         if (_Sv.fail) {
@@ -1880,7 +1935,7 @@ static int save_copy_lib(void)
     if (_P.sav_size <= 15u * 4096u) {
         (void)index_load();
         _P.ent = ent_for(_P.crc, _P.sav_size, 1);
-        if (_P.ent >= 0 && save_copy_store() == 0) { memcpy(_Ix.e[_P.ent].rtc, rt, 5); _Ix.e[_P.ent].used = RC_ENT_PENDING; (void)index_save(); }
+        if (_P.ent >= 0 && save_copy_store() == 0) { memcpy(_Ix.e[_P.ent].rtc, kp, 5); _Ix.tm[_P.ent] = (uint32_t)tk; _Ix.e[_P.ent].used = RC_ENT_PENDING; (void)index_save(); }
         _P.ent = -1;
     }
     return -2;
@@ -2083,6 +2138,27 @@ int CfRc_LibShareRead(const cf_lib_ent_t *e, const cf_lib_save_t *sv, int save, 
 static volatile int _GivenNext;
 void CfRc_SaveComesWith(int on) { _GivenNext = on ? 1 : 0; }
 static int lib_put_given(uint32_t uid);
+/* ---- lane savecloud1: SAVE TO MY GAMES. Asked by the page when a kept game's page opens: 1 yes, 0 none, -1 not known yet
+   (asked; the page asks again on its next draw). Nothing is asked while a game plays (the journal is not read then). */
+int CfRc_LibSaveKnown(uint32_t uid)
+{
+    if (_SvProbe.uid == uid && _SvProbe.st >= 2) return _SvProbe.st == 3;
+    if (_SvProbe.uid == uid && _SvProbe.st == 1) return -1;
+    if (_LibArea != 1 || _LibOp.busy || CfRc_Playing()) return -1;
+    _SvProbe.uid = uid; _SvProbe.st = 1;
+    _LibOp.uid = uid;
+    if (lib_ask(RC_LIB_SVPROBE)) _SvProbe.st = 0;
+    return -1;
+}
+void CfRc_LibSaveForget(void) { _SvProbe.st = 0; _SvProbe.uid = 0; }
+/* the library closed on the task for a handshake's heap; 0 = done */
+int CfRc_LibNetClose(void)
+{
+    for (int t = 0; t < 100 && _LibOp.busy; t++) vTaskDelay(pdMS_TO_TICKS(50));
+    if (_LibOp.busy || lib_ask(RC_LIB_NETCLOSE)) return -1;
+    for (int t = 0; t < 100 && _LibOp.busy; t++) vTaskDelay(pdMS_TO_TICKS(50));
+    return _LibOp.busy ? -1 : 0;
+}
 int CfRc_LibSavePutFromRam(uint32_t uid)
 {
     if (_LibOp.busy) return -1;
@@ -2221,7 +2297,7 @@ static void lib_migrate(void)
     if (ent >= 0 && _Ix.e[ent].dcrc) {
         _LibUid = uid;
         const uint32_t base = store_base() + (uint32_t)_Ix.e[ent].sect * 4096u;
-        const int se = cf_lib_save_put(_L, uid, m.save_size, _Ix.e[ent].rtc, stage_get, (void *)(uintptr_t)base);
+        const int se = cf_lib_save_put_t(_L, uid, m.save_size, _Ix.e[ent].rtc, sdc_tsec_pack(ix_tm(ent)), stage_get, (void *)(uintptr_t)base);
         printf("rc: lib: its save into the library: e=%d\n", se);
         if (se) return;                                 /* (the game stays kept as before too: done again next time) */
     }
@@ -2338,7 +2414,7 @@ static int lib_to_sd(uint32_t uid)
             const uint32_t n = e0.save_size - o < 1024u ? e0.save_size - o : 1024u;
             se = cf_lib_save_read(_L, uid, &sv, o, b, n) || Sd_WriteAt(ws, o, b, n);
         }
-        if (!se && (e0.flags & CF_LIB_F_RTC)) { uint8_t ft[SDC_RTC_FOOTER]; sdc_rtc_put(ft, sv.rtc, Sd_UnixTime()); se = Sd_WriteAt(ws, e0.save_size, ft, sizeof ft); }
+        if (!se && (e0.flags & CF_LIB_F_RTC)) { uint8_t ft[SDC_RTC_FOOTER]; sdc_rtc_put(ft, sv.rtc, sdc_tsec_unpack(sv.tsec, CwlTime_Anchor()));   /* (1.1.7: when the clock was true, not now) */ se = Sd_WriteAt(ws, e0.save_size, ft, sizeof ft); }
         if (!se) se = Sd_WriteCommit(ws); else if (ws && ws->open) Sd_WriteAbort(ws);
         free(b); free(ws);
         printf("rc: lib: its save (%lu bytes) onto the card as %s: e=%d\n", (unsigned long)e0.save_size, sp, se);
@@ -2381,6 +2457,7 @@ static int lib_save_in(uint32_t uid, int from_card)
     if (!size) return 0;                                /* (a game with no save) */
     sv_in_t s = { NULL, 0, _Cp.src };
     uint8_t rtc[5] = { 0 };
+    uint64_t tk = 0;                                    /* 1.1.7: when the clock was true (0 = not known) */
     if (from_card) {
         s.f = malloc(sizeof *s.f);
         if (!s.f) return -1;
@@ -2390,17 +2467,19 @@ static int lib_save_in(uint32_t uid, int from_card)
             const uint32_t fl = s.fsize - size >= 48u ? 48u : 44u;
             if (Sd_Read(s.f, size, ft, fl, &got) == 0 && got == fl && sdc_rtc_get(ft, fl, rtc, &t) == 0) {
                 const uint64_t now = Sd_UnixTime();
-                if (now && t && now > t) sdc_rtc_advance(rtc, now - t);
+                tk = t;
+                if (now && t && now > t) { sdc_rtc_advance(rtc, now - t); tk = now; }
             }
         }
     }
-    int e = cf_lib_save_put(_L, uid, size, rtc, sv_in_get, &s);
+    const uint32_t tsec = sdc_tsec_pack(tk);
+    int e = cf_lib_save_put_t(_L, uid, size, rtc, tsec, sv_in_get, &s);
     if (e == CF_LIB_E_FLASH) {
         /* (unit 1, the first save into a library just made: one flash op refused; the FPGA's op engine reset, once more) */
         printf("rc: lib: the save's flash op failed: again\n");
         (void)CfRc_Reset();
         vTaskDelay(pdMS_TO_TICKS(200));
-        e = cf_lib_save_put(_L, uid, size, rtc, sv_in_get, &s);
+        e = cf_lib_save_put_t(_L, uid, size, rtc, tsec, sv_in_get, &s);
     }
     if (s.f) { Sd_Close(s.f); free(s.f); }
     printf("rc: lib: a save (%lu bytes) into the library for game %lu from %s: e=%d\n", (unsigned long)size, (unsigned long)uid, from_card ? _Cp.path : "the staging area", e);
@@ -2458,6 +2537,15 @@ static void lib_ops(void)
         _LibGen++;
         return;
     }
+    if (op == RC_LIB_NETCLOSE) {
+        /* lane savecloud1: the library closed for a TLS handshake's heap (SAVE TO MY GAMES reads the save by its extents, not
+           through the open library); the page's copy of the list stays, the page opens it again when the job is over */
+        if (_L && !(_Src == 3 && CfRc_Playing())) { free(_L); _L = NULL; }
+        _SnapWant = 0;
+        _LibOp.res = 0;
+        _LibOp.busy = 0;
+        return;
+    }
     const int given = (op == RC_LIB_ADD || op == RC_LIB_END) ? _GivenNext : 0;   /* lane mygames1 */
     if (given) _GivenNext = 0;
     int e = lib_open();
@@ -2512,6 +2600,14 @@ static void lib_ops(void)
         if (i < 0) e = CF_LIB_E_NONE;
         else { _ShEnt = _L->ix.e[i]; memset(&_ShSv, 0, sizeof _ShSv); if (_ShEnt.save_size && cf_lib_save_get(_L, _ShEnt.uid, &_ShSv)) memset(&_ShSv, 0, sizeof _ShSv); }
     }
+    else if (!e && op == RC_LIB_SVPROBE) {
+        /* lane savecloud1: does the kept game have a save in the journal (whole: its size is the game's)? */
+        cf_lib_save_t sv;
+        const int i = cf_lib_find(_L, _LibOp.uid);
+        int has = 0;
+        if (i >= 0 && _L->ix.e[i].save_size && cf_lib_save_get(_L, _LibOp.uid, &sv) == 0 && sv.seq && sv.size == _L->ix.e[i].save_size) has = 1;
+        if (_SvProbe.uid == _LibOp.uid) _SvProbe.st = has ? 3 : 2;
+    }
     else if (!e && op == RC_LIB_SVPUT) {
         /* lane share1: the save that came with a shared game (in the save RAM) as the game's save in the library */
         const int i = cf_lib_find(_L, _LibOp.uid);
@@ -2525,6 +2621,7 @@ static void lib_ops(void)
         CfRc_Keep(_LibOp.src, _LibOp.len, _LibOp.crc, _LibOp.meta.title);
         _InRam = 0; _Src = 0; _SaveGiven = given; (void)play_now();
     }
+    if (op == RC_LIB_SVPROBE && _SvProbe.st == 1) _SvProbe.st = 0;     /* (not answered: asked again) */
     lib_snap();
     net_release();
     _LibOp.res = e;
@@ -2694,6 +2791,7 @@ static void rc_task(void *arg)
         lib_ops();                                      /* lane gamecomp1 */
         if (_P.st == kNwPv_Playing) {
             /* the save: the FPGA's dirty flag, cleared at once; copied once writes have stopped */
+            _PollUs = esp_timer_get_time();
             const uint8_t s = CF_XS_P_STATUS;
             const uint32_t n0 = _StN;
             xs_send(&s, 1);
@@ -2712,7 +2810,9 @@ static void rc_task(void *arg)
             if (_Src == 2 && _P.rtc && !_P.pend && now - _P.last_save >= 60000u) { _P.pend = 1; _P.pend_at = now - RC_QUIET_MS; _P.pend_first = now; _SdStopping = 1; }
             if (_P.pend && (now - _P.pend_at >= RC_QUIET_MS || now - _P.pend_first >= RC_MAX_MS)) {
                 _P.pend = 0;
+                _SaveBusy = 1;                       /* savefast1: no nap inside a copy or its erase ahead */
                 const int sc = save_copy();
+                _SaveBusy = 0;
                 _SdStopping = 0;
                 if (sc < 0 && _Src != 2) printf("rc: save: the copy to the store failed (tried again)\n");
                 if (sc) { _P.pend = 1; _P.pend_at = now; }
@@ -2767,7 +2867,14 @@ int CfRc_Loading(void) { return _P.st == kNwPv_Loading || _P.req == 1; }
    one and the next op's status was lost ("THE FPGA DID NOT ANSWER"; unit 1, a staged 1 MiB play: 6 of 6 with nothing written
    to the console, 0 of 29 when the console was written to: a keystroke keeps the unit awake 10 s). A game that only plays
    still lets the unit sleep (it wakes on the FPGA's UART, as with a cartridge). */
-int CfRc_KeepAwake(void) { return _P.st == kNwPv_Loading || _P.req != 0 || _LibOp.busy; }   /* fwshrink1: a load (QSPI / PSRAM / FPGA flash) under way or asked for */
+/* lane savefix1: also while a save copy is pending, and while the poll is overdue (a timer wake: see cf_rc_sleep.h) */
+int CfRc_KeepAwake(void)
+{
+    const int64_t age = esp_timer_get_time() - _PollUs;
+    return cf_rc_keep_awake(_P.st == kNwPv_Loading, _P.req, _LibOp.busy, _P.pend || _SaveBusy, _P.st == kNwPv_Playing, age < 0 ? 0u : (uint32_t)(age / 1000));
+}
+/* lane savefix1: a game playing wakes the unit from light sleep this often (pwrmgr.c), so the save poll above keeps running */
+uint32_t CfRc_SleepTimerMs(void) { return cf_rc_sleep_timer_ms(_P.st == kNwPv_Playing); }
 static int playing(void) { return CfRc_Playing(); }
 void CfRc_PlayKept(void) { _InRam = 0; _Src = 0; ask_task(1); }
 /* lane sdcard1: a game on the microSD card (its path from the root) */
@@ -3362,7 +3469,14 @@ static int cmd_rc(int argc, char **argv)
                (unsigned long)((r >> 16) & 0x1F), (unsigned long)((r >> 8) & 0x3F), (unsigned long)(r & 0x3F), _St[16]);
         return 0;
     }
-    printf("rc: st | reset | fid | fcrc A N | probe | load FLASH LEN | ram [FLASH] LEN | on MBC ROMBANKS RAMBANKS [rtc] | off | save LEN | rtc [S M H D]\n");
+    if (!strcmp(c, "time")) {                          /* 1.1.7 bench: rc time [block|unblock] */
+        if (argc >= 4 && !strcmp(argv[2], "set")) printf("rc: time by hand: %s\n", CwlTime_SetByHand(strtoull(argv[3], NULL, 10)) ? "set" : "refused");   /* (bench: as the clock page) */
+        else if (argc >= 3) { const int b = !strcmp(argv[2], "block"); CwlTime_Block(b); }
+        CwlTime_Print();
+        printf("rc: game clocks use: %llu\n", (unsigned long long)Sd_UnixTime());
+        return 0;
+    }
+    printf("rc: st | reset | fid | fcrc A N | probe | load FLASH LEN | ram [FLASH] LEN | on MBC ROMBANKS RAMBANKS [rtc] | off | save LEN | rtc [S M H D] | time [block|unblock|set UNIX]\n");
     return 0;
 }
 

@@ -20,6 +20,7 @@ idf_component_register(SRCS
     "img_toggle_off.c"
     "img_toggle_on.c"
     "menu_controls.c"
+    "menu_colortemp.c"
     "menu_display.c"
     "menu_games.c"
     "menu_palette.c"

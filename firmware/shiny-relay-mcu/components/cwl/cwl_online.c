@@ -1,5 +1,6 @@
 // cwl_online.c: Shiny Link pairing + tickets over HTTPS. See cwl_online.h.
 #include "cwl_online.h"
+#include "cwl_time.h"
 #include "cwl.h"
 #include "cwl_sec.h"
 #include "cwl_wdt.h"
@@ -257,6 +258,8 @@ bool CwlOnline_Quiet(uint32_t wait_ms)
 }
 static esp_err_t HttpEvent(esp_http_client_event_t *e)
 {
+    if (e->event_id == HTTP_EVENT_ON_HEADER && e->header_key && e->header_value && !strcasecmp(e->header_key, "Date"))
+        (void)CwlTime_FromHttpDate(e->header_value);   // 1.1.7: the real time from our server when nothing set the clock yet
     if (e->event_id == HTTP_EVENT_ON_HEADER && e->header_key && e->header_value && !strcasecmp(e->header_key, "Connection") &&
         !strcasecmp(e->header_value, "close"))
         _ConnClose = true;

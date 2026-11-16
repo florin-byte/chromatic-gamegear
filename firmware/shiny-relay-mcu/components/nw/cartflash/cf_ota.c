@@ -94,6 +94,8 @@ static int url_ok(const char *u, const char *sha)
     return !strcmp(slash, want);
 }
 
+int cf_ota_is_custom(const char *version) { return version && strstr(version, "-cfw.") != NULL; }
+
 int cf_ota_parse(const char *json, cf_ota_offer_t *o, const char **why)
 {
     *why = "";
@@ -121,6 +123,9 @@ int cf_ota_parse(const char *json, cf_ota_offer_t *o, const char **why)
         if (jstr(json, "fpga_url", o->furl, sizeof o->furl) < 1 || !url_ok(o->furl, o->fsha256)) { *why = "fpga_url"; return -1; }
     }
     if (!o->size && !o->fsize) { *why = "empty"; return -1; }
+    /* the custom build's name, for the screen: letters, digits and spaces only (anything else: no name) */
+    if (jstr(json, "name", o->name, sizeof o->name) < 1) o->name[0] = 0;
+    for (const char *p = o->name; *p; p++) if (!(isalnum((unsigned char)*p) || *p == ' ')) { o->name[0] = 0; break; }
     return 1;
 }
 
@@ -167,6 +172,7 @@ void cf_ota_init(cf_ota_t *c, const cf_ota_host_t *h, uint32_t now)
     c->btn = -1;
 }
 void cf_ota_button(cf_ota_t *c, int a) { c->btn = a ? 1 : 0; }
+void cf_ota_custom(cf_ota_t *c) { c->btn = 2; }
 int cf_ota_busy(const cf_ota_t *c) { return !(c->st == OT_IDLE || c->st == OT_READY || c->st == OT_RESULT); }
 
 void cf_ota_notice(cf_ota_t *c, int what, const char *version)
@@ -174,12 +180,24 @@ void cf_ota_notice(cf_ota_t *c, int what, const char *version)
     snprintf(c->res_ver, sizeof c->res_ver, "%s", version ? version : "");
     c->res_title = what == 2 ? "UPDATE  DID  NOT  START" : "UPDATED";
     c->res_rows = what == 1 ? "SHINY  RELAY  IS|UP  TO  DATE" : what == 3 ? "TURN  IT  OFF  AND|ON  TO  FINISH" : "THE  OLD  VERSION|IS  BACK";
+    c->chan = CF_OTA_OFFICIAL;
+    if (what == 1 && cf_ota_is_custom(version)) {        /* a custom build confirmed itself */
+        c->chan = CF_OTA_CUSTOM;
+        c->res_title = "BUILD  INSTALLED";
+        c->res_rows = "YOUR  CUSTOM  BUILD|RUNS  NOW";
+    }
     c->st = OT_RESULT;
 }
 
-static void start(cf_ota_t *c)
+static void start(cf_ota_t *c, int chan)
 {
-    if (c->h.ready && c->h.ready(c->h.user, &c->offer)) { c->st = OT_READY; return; }   /* one is waiting already */
+    c->chan = chan;
+    if (c->h.ready && c->h.ready(c->h.user, &c->offer)) {
+        if (cf_ota_is_custom(c->offer.version) == (chan == CF_OTA_CUSTOM)) { c->st = OT_READY; return; }   /* one is waiting already */
+        /* the other channel's image waits in the slot: it goes (UPDATE never installs a custom build, CUSTOM never a release) */
+        if (c->h.ready_forget) c->h.ready_forget(c->h.user);
+        logf_(c, "cf: update: the waiting %s is dropped (the other page asked)", c->offer.version);
+    }
     if (c->h.slots && !c->h.slots(c->h.user)) { result(c, "UPDATE  OVER  USB", "THIS  CHROMATIC|NEEDS  IT  ONCE"); return; }
     if (c->h.busy && c->h.busy(c->h.user)) { result(c, "NOT  NOW", "A  CART  JOB  IS|RUNNING"); return; }
     c->n_checks++;
@@ -187,7 +205,7 @@ static void start(cf_ota_t *c)
     hold(c, 1);
     c->st = OT_HOLD;
     c->t0 = c->now;
-    logf_(c, "cf: update: checking (the link stops meanwhile)");
+    logf_(c, "cf: update: checking%s (the link stops meanwhile)", chan == CF_OTA_CUSTOM ? " for a custom build" : "");
 }
 
 /* a call the device API could not start yet (its heap, a call still closing): back to OT_HOLD, which asks again each
@@ -199,7 +217,8 @@ static void not_yet(cf_ota_t *c)
 }
 static void ask(cf_ota_t *c)
 {
-    if (c->h.registered && !c->h.registered(c->h.user)) {
+    /* (the custom check goes with the pairing token: no registration needed for it) */
+    if (c->chan == CF_OTA_OFFICIAL && c->h.registered && !c->h.registered(c->h.user)) {
         const uint32_t t = c->t0;
         if (api(c, "/link_device/register", "{}")) c->st = OT_REG;
         else { c->t0 = t; not_yet(c); }
@@ -207,9 +226,11 @@ static void ask(cf_ota_t *c)
     }
     char ver[16] = "", fpga[8] = "", pt[65] = "", bl[65] = "", fl[8] = "", body[240];
     if (c->h.me) c->h.me(c->h.user, ver, fpga, pt, bl, fl);
-    snprintf(body, sizeof body, "{\"version\":\"%s\",\"fpga\":\"%s\",\"pt\":\"%s\",\"bl\":\"%s\",\"fl\":\"%s\"}", ver, fpga, pt, bl, fl);
+    /* "split":1 (1.1.12): this unit has SYSTEM > CUSTOM, so UPDATE's answer must be an official release only */
+    snprintf(body, sizeof body, "{\"version\":\"%s\",\"fpga\":\"%s\",\"pt\":\"%s\",\"bl\":\"%s\",\"fl\":\"%s\"%s}", ver, fpga, pt, bl, fl,
+             c->chan == CF_OTA_CUSTOM ? "" : ",\"split\":1");
     const uint32_t t = c->t0;
-    if (api(c, "/link_device/fw/check", body)) c->st = OT_CHECK;
+    if (api(c, c->chan == CF_OTA_CUSTOM ? "/link_device/fw/custom" : "/link_device/fw/check", body)) c->st = OT_CHECK;
     else { c->t0 = t; not_yet(c); }
 }
 
@@ -228,10 +249,11 @@ void cf_ota_tick(cf_ota_t *c, uint32_t now)
     int code;
     switch (c->st) {
     case OT_IDLE:
-        if (b == 1) start(c);
+        if (b == 1) start(c, CF_OTA_OFFICIAL);
+        else if (b == 2) start(c, CF_OTA_CUSTOM);
         return;
     case OT_RESULT:
-        if (b == 0 || b == 1) { c->st = OT_IDLE; c->res_title = NULL; }
+        if (b == 0 || b == 1) { c->st = OT_IDLE; c->res_title = NULL; c->res_ver[0] = 0; }
         return;
     case OT_HOLD: {
         if (b == 0) { result(c, "CANCELLED", "NOTHING  CHANGED|"); return; }
@@ -250,11 +272,27 @@ void cf_ota_tick(cf_ota_t *c, uint32_t now)
         return;
     case OT_CHECK: {
         if (!api_done(c, &code)) return;
-        if (code == 401 && c->reg_tries == 0 && c->h.reg_forget) { c->reg_tries = 1; c->h.reg_forget(c->h.user); c->t0 = now; ask(c); return; }
+        const int custom = c->chan == CF_OTA_CUSTOM;
+        if (custom && (code == 401 || code == 403)) { result(c, "NOT  LINKED", "LINK  IT  AGAIN|IN  ONLINE"); return; }   /* the pairing was ended */
+        if (!custom && code == 401 && c->reg_tries == 0 && c->h.reg_forget) { c->reg_tries = 1; c->h.reg_forget(c->h.user); c->t0 = now; ask(c); return; }
         if (code != 200) { result(c, "CHECK  FAILED", call_rows(code)); return; }
         const char *why;
-        const int r = cf_ota_parse(c->buf, &c->offer, &why);
+        int r = cf_ota_parse(c->buf, &c->offer, &why);
+        const int first = custom && r == 0 && jtrue(c->buf, "first"), running = custom && r == 0 && jtrue(c->buf, "running");
         io_free(c);
+        /* each page takes its own kind only: UPDATE a release, CUSTOM a custom app (never an FPGA image) */
+        if (r == 1 && (cf_ota_is_custom(c->offer.version) != custom || (custom && c->offer.fsize))) { r = -1; why = "channel"; }
+        if (custom && r == 0) {
+            if (first) result(c, "UPDATE  FIRST", "USE  UPDATE,  THEN|CHECK  HERE  AGAIN");
+            else if (running) result(c, "ALREADY  INSTALLED", "THIS  BUILD  RUNS|NOW");
+            else result(c, "NO  BUILD  WAITING", "SEND  ONE  FROM|SHINYRELAY.COM");
+            return;
+        }
+        if (custom && r == 2) {
+            result(c, "INSTALL  OVER  USB", "IT  CHANGES  THE|FLASH  LAYOUT");
+            snprintf(c->res_ver, sizeof c->res_ver, "%s", c->offer.version);
+            return;
+        }
         if (r == 0) { result(c, "UP  TO  DATE", "SHINY  RELAY  HAS|NO  UPDATE  NOW"); return; }
         if (r == 2) {
             result(c, "UPDATE  OVER  USB", !strcmp(why, "fpga") ? "IT  NEEDS  A  NEW|CONSOLE  CHIP" : "IT  CHANGES  THE|FLASH  LAYOUT");
@@ -262,6 +300,7 @@ void cf_ota_tick(cf_ota_t *c, uint32_t now)
             return;
         }
         if (r < 0) { logf_(c, "cf: update: an answer the unit does not take (%s)", why); result(c, "CHECK  FAILED", "SERVER  ERROR|TRY  AGAIN  LATER"); return; }
+        if (custom) { c->st = OT_OFFER; c->t0 = now; logf_(c, "cf: update: custom build %s waits (A downloads it)", c->offer.version); return; }
         if (c->h.busy && c->h.busy(c->h.user)) { result(c, "NOT  NOW", "A  CART  JOB  IS|RUNNING"); return; }
         if (c->h.dl_start(c->h.user, &c->offer)) { result(c, "DOWNLOAD  FAILED", "NOT  ENOUGH  MEMORY|RESTART,  TRY  AGAIN"); return; }
         c->n_dl++;
@@ -271,6 +310,16 @@ void cf_ota_tick(cf_ota_t *c, uint32_t now)
               c->offer.fsize ? c->offer.fversion : "-", (unsigned long)c->offer.fsize);
         return;
     }
+    case OT_OFFER:                                          /* CUSTOM: the build is shown; nothing is fetched before A */
+        if (b == 0 || due(now, c->t0 + CF_OTA_OFFER_MS)) { result(c, "CANCELLED", "NOTHING  CHANGED|"); return; }
+        if (b != 1) return;
+        if (c->h.busy && c->h.busy(c->h.user)) { result(c, "NOT  NOW", "A  CART  JOB  IS|RUNNING"); return; }
+        if (c->h.dl_start(c->h.user, &c->offer)) { result(c, "DOWNLOAD  FAILED", "NOT  ENOUGH  MEMORY|RESTART,  TRY  AGAIN"); return; }
+        c->n_dl++;
+        c->pct = 0;
+        c->st = OT_DL;
+        logf_(c, "cf: update: custom build %s (%lu bytes) is downloading", c->offer.version, (unsigned long)c->offer.size);
+        return;
     case OT_DL: {
         if (b == 0) { c->h.dl_cancel(c->h.user); result(c, "CANCELLED", "NOTHING  CHANGED|"); return; }
         int pct = 0;
@@ -312,10 +361,17 @@ void cf_ota_tick(cf_ota_t *c, uint32_t now)
 void cf_ota_view(const cf_ota_t *c, cf_ota_view_t *v)
 {
     memset(v, 0, sizeof *v);
+    v->custom = c->st == OT_IDLE ? 0 : c->chan == CF_OTA_CUSTOM;
+    if (c->st == OT_READY) v->custom = cf_ota_is_custom(c->offer.version);
+    if (c->st == OT_OFFER || c->st == OT_DL || c->st == OT_READY) snprintf(v->name, sizeof v->name, "%s", c->offer.name);
     switch (c->st) {
     case OT_HOLD: case OT_REG: case OT_CHECK:
         v->kind = OV_BUSY;
         snprintf(v->title, sizeof v->title, "CHECKING");
+        return;
+    case OT_OFFER:
+        v->kind = OV_OFFER;
+        snprintf(v->version, sizeof v->version, "%s", c->offer.version);
         return;
     case OT_DL:
         v->kind = OV_DL;

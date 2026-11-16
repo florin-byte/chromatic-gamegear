@@ -173,6 +173,34 @@ int main(void)
     press(1);
     cf_ota_notice(&C, 3, "1.1.1"); check(!strcmp(view().title, "UPDATED") && strstr(view().note, "OFF  AND"), "the app runs, its FPGA from the next power-on: TURN IT OFF AND ON");
 
+    printf("1.1.12: UPDATE is official only, CUSTOM is its own channel\n"); reset();
+#define CUSTOM "{\"update\": true, \"version\": \"1.1.1-cfw.ab12\", \"name\": \"MY  BUILD\", \"size\": 1500000, \"sha256\": \"" SHA "\", \"url\": \"http://dl.shinyrelay.com/gbnet/v1/fw/" SHA ".bin\"}"
+    check(cf_ota_is_custom("1.1.11-cfw.75db") && cf_ota_is_custom("1.10.12-cfw.ab1") && !cf_ota_is_custom("1.1.12") && !cf_ota_is_custom("1.1.1-test2"), "what a custom version is");
+    check(cf_ota_parse(CUSTOM, &o, &why) == 1 && !strcmp(o.name, "MY  BUILD"), "an offer's name");
+    check(cf_ota_parse("{\"update\": true, \"version\": \"1.1.1-cfw.ab12\", \"name\": \"<b>x\", \"size\": 1500000, \"sha256\": \"" SHA "\", \"url\": \"http://dl.shinyrelay.com/gbnet/v1/fw/" SHA ".bin\"}", &o, &why) == 1 && !o.name[0], "a name with other characters is not shown");
+    press(1); run(2000);
+    check(strstr(last_body, "\"split\":1") && !strcmp(last_path, "/link_device/fw/check"), "the update check says split:1");
+    press(1);
+    snprintf(answer, sizeof answer, "%s", CUSTOM); press(1); run(2000);
+    check(n_dl == 0 && view().kind == OV_RESULT && !strcmp(view().title, "CHECK  FAILED"), "UPDATE refuses a custom build");
+    press(1);
+    registered = 0; { const int r0 = n_regs; cf_ota_custom(&C); run(2000);
+    check(!strcmp(last_path, "/link_device/fw/custom") && !strstr(last_body, "split") && n_regs == r0, "CUSTOM asks its own route, without registering"); }
+    check(view().kind == OV_OFFER && view().custom && !strcmp(view().name, "MY  BUILD") && !strcmp(view().version, "1.1.1-cfw.ab12") && n_dl == 0 && hold_on == 1, "BUILD WAITING: shown, nothing downloaded");
+    press(1); check(n_dl == 1 && view().kind == OV_DL && view().custom, "A downloads it");
+    dl_ret = 0; run(300); check(view().kind == OV_READY && view().custom && hold_on == 0, "BUILD READY");
+    press(0); registered = 1;
+    snprintf(answer, sizeof answer, "{\"update\": false}"); press(1); run(2000);
+    check(n_forget == 1 && n_install == 0 && !strcmp(view().title, "UP  TO  DATE"), "A on UPDATE with a custom build waiting: dropped, never installed");
+    press(1);
+    reset(); snprintf(answer, sizeof answer, "%s", OFFER); cf_ota_custom(&C); run(2000);
+    check(n_dl == 0 && !strcmp(view().title, "CHECK  FAILED"), "CUSTOM refuses a release");
+    press(1); ans_code = 401; cf_ota_custom(&C); run(2000);
+    check(!strcmp(view().title, "NOT  LINKED") && registered == 1 && n_regs == 0, "CUSTOM refused by the server: NOT LINKED, the registration kept");
+    press(1); ans_code = 200; snprintf(answer, sizeof answer, "%s", CUSTOM); cf_ota_custom(&C); run(2000); run(CF_OTA_OFFER_MS + 200);
+    check(view().kind == OV_RESULT && hold_on == 0 && n_dl == 0, "BUILD WAITING left alone: ends, the link back");
+    press(1); cf_ota_notice(&C, 1, "1.1.1-cfw.ab12"); check(!strcmp(view().title, "BUILD  INSTALLED") && view().custom, "a custom build that confirmed itself");
+
     printf("cf_ota_test: %d ok, %d failed\n", ok_n, bad_n);
     return bad_n ? 1 : 0;
 }

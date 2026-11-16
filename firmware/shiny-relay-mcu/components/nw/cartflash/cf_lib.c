@@ -201,6 +201,7 @@ static int j_scan(cf_lib_t *L)
                 if (L->ix.e[i].uid != j->uid || j->seq <= L->sv[i].seq || j->slot >= L->ix.e[i].kslots || j->size != L->ix.e[i].save_size) continue;
                 L->sv[i].seq = j->seq; L->sv[i].slot = j->slot; L->sv[i].size = j->size; L->sv[i].crc = j->crc;
                 memcpy(L->sv[i].rtc, j->rtc, 5);
+                L->sv[i].tsec = (uint32_t)j->rsv[0] | (uint32_t)j->rsv[1] << 8 | (uint32_t)j->rsv[2] << 16;   /* 1.1.7: when the clock was true (0 = not known: a record from before) */
                 L->svsect[i] = (uint8_t)s;
             }
         }
@@ -214,7 +215,6 @@ static int j_append(cf_lib_t *L, jrec_t *r)
 {
     if (L->jnext >= J_PER) return CF_LIB_E_FULL;
     r->magic = J_MAGIC; r->seq = ++L->jseq;
-    memset(r->rsv, 0, sizeof r->rsv);
     r->rcrc = rec_crc(r);
     const uint32_t a = j_addr(L, L->jsect) + (uint32_t)L->jnext * J_REC;
     L->jnext++;                                            /* (a failed or torn record is skipped either way) */
@@ -233,6 +233,7 @@ static int j_room(cf_lib_t *L)
         if (L->svsect[i] != nx || !L->sv[i].seq) continue;
         jrec_t r = { .slot = L->sv[i].slot, .uid = L->sv[i].uid, .size = L->sv[i].size, .crc = L->sv[i].crc };
         memcpy(r.rtc, L->sv[i].rtc, 5);
+        r.rsv[0] = (uint8_t)L->sv[i].tsec; r.rsv[1] = (uint8_t)(L->sv[i].tsec >> 8); r.rsv[2] = (uint8_t)(L->sv[i].tsec >> 16);
         const int e = j_append(L, &r);
         if (e) return e;
         L->sv[i].seq = r.seq; L->svsect[i] = L->jsect;
@@ -489,8 +490,29 @@ int cf_lib_save_read(cf_lib_t *L, uint32_t uid, const cf_lib_save_t *sv, uint32_
     if (!sv->seq || (uint64_t)off + n > e->save_size) return CF_LIB_E_ARG;
     return rd(L, slot_addr(L, e, sv->slot, off), b, n);
 }
+/* savefast1: the slot the next save goes to erased ahead of the save. It holds no record the journal calls newest (that is
+   the other slot), so a power cut here loses nothing; what is erased is remembered in RAM only, and only for this boot. */
+int cf_lib_save_prepare(cf_lib_t *L, uint32_t uid)
+{
+    const int i = cf_lib_find(L, uid);
+    if (i < 0) return CF_LIB_E_NONE;
+    const cf_lib_ent_t *e = &L->ix.e[i];
+    if (!e->save_size || e->kslots < 2 || !e->sext.count) return CF_LIB_E_ARG;
+    if (!L->jok && j_scan(L)) return CF_LIB_E_FLASH;
+    const uint16_t slot = L->sv[i].seq ? (uint16_t)((L->sv[i].slot + 1u) % e->kslots) : 0u;
+    if (L->ready && L->ready_uid == uid && L->ready_slot == slot) return 0;
+    L->ready = 0;
+    if (er(L, slot_addr(L, e, slot, 0), slot_bytes(e))) return CF_LIB_E_FLASH;
+    L->ready = 1; L->ready_uid = uid; L->ready_slot = slot;
+    return 0;
+}
 int cf_lib_save_put(cf_lib_t *L, uint32_t uid, uint32_t size, const uint8_t rtc[5],
                     int (*get)(void *u, uint32_t off, uint8_t *b, uint32_t n), void *gu)
+{
+    return cf_lib_save_put_t(L, uid, size, rtc, 0, get, gu);
+}
+int cf_lib_save_put_t(cf_lib_t *L, uint32_t uid, uint32_t size, const uint8_t rtc[5], uint32_t tsec,
+                      int (*get)(void *u, uint32_t off, uint8_t *b, uint32_t n), void *gu)
 {
     const int i = cf_lib_find(L, uid);
     if (i < 0) return CF_LIB_E_NONE;
@@ -500,7 +522,9 @@ int cf_lib_save_put(cf_lib_t *L, uint32_t uid, uint32_t size, const uint8_t rtc[
     int r = j_room(L);
     if (r) return r;
     const uint16_t slot = L->sv[i].seq ? (uint16_t)((L->sv[i].slot + 1u) % e->kslots) : 0u;
-    if (er(L, slot_addr(L, e, slot, 0), slot_bytes(e))) return CF_LIB_E_FLASH;
+    const int erased = L->ready && L->ready_uid == uid && L->ready_slot == slot;
+    L->ready = 0;                                          /* (whatever happens next, the slot is no longer known blank) */
+    if (!erased && er(L, slot_addr(L, e, slot, 0), slot_bytes(e))) return CF_LIB_E_FLASH;
     uint32_t crc = 0;
     for (uint32_t o = 0; o < size; o += CF_LIB_BUF) {
         const uint32_t n = size - o < CF_LIB_BUF ? size - o : CF_LIB_BUF;
@@ -513,10 +537,12 @@ int cf_lib_save_put(cf_lib_t *L, uint32_t uid, uint32_t size, const uint8_t rtc[
     if (c != crc) return CF_LIB_E_VERIFY;
     jrec_t j = { .slot = slot, .uid = uid, .size = size, .crc = crc };
     if (rtc) memcpy(j.rtc, rtc, 5);
+    j.rsv[0] = (uint8_t)tsec; j.rsv[1] = (uint8_t)(tsec >> 8); j.rsv[2] = (uint8_t)(tsec >> 16);
     r = j_append(L, &j);
     if (r) return r;
     L->sv[i].seq = j.seq; L->sv[i].slot = slot; L->sv[i].size = size; L->sv[i].crc = crc;
     memcpy(L->sv[i].rtc, j.rtc, 5);
+    L->sv[i].tsec = tsec & 0xFFFFFFu;
     L->svsect[i] = L->jsect;
     return 0;
 }

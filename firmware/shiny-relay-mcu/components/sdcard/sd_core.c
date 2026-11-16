@@ -300,3 +300,47 @@ void sdc_rtc_advance(uint8_t r[5], uint64_t s)
     r[3] = (uint8_t)day;
     r[4] = (uint8_t)((r[4] & 0xFE) | (day >> 8));
 }
+
+int sdc_clk_load(sdc_clk_t *c, uint8_t rtc[5], uint64_t t_saved, uint64_t now, int64_t up)
+{
+    int adv = 0;
+    memset(c, 0, sizeof *c);
+    c->up0 = up;
+    if (now && t_saved) {
+        if (now > t_saved) { sdc_rtc_advance(rtc, now - t_saved); adv = 1; }
+        c->t_ref = now;
+    } else if (now) {
+        c->t_ref = now;                                   /* nothing to catch up (no time was kept with it) */
+    } else if (t_saved) {
+        c->t_ref = t_saved;                               /* the clock as it was left: the gap is caught up later */
+        c->pending = 1;
+    }
+    return adv;
+}
+uint64_t sdc_clk_save(const sdc_clk_t *c, uint8_t rtc[5], uint64_t now, int64_t up)
+{
+    const int64_t ran = up > c->up0 ? up - c->up0 : 0;      /* the seconds the game has run since the load */
+    if (now) {
+        if (c->pending && now > (uint64_t)ran) {
+            const uint64_t at_load = now - (uint64_t)ran;    /* the real time at the load */
+            if (at_load > c->t_ref) sdc_rtc_advance(rtc, at_load - c->t_ref);
+        }
+        return now;
+    }
+    if (c->t_ref) return c->t_ref + (uint64_t)ran;           /* no real time: the last one known plus the time played */
+    return 0;
+}
+uint32_t sdc_tsec_pack(uint64_t t)
+{
+    if (t <= SDC_T_EPOCH) return 0;
+    const uint32_t v = (uint32_t)((t - SDC_T_EPOCH) & SDC_TSEC_MASK);
+    return v ? v : 1u;                                    /* (0 is "not known": the one second in 194 days that is 0 is read as 1) */
+}
+uint64_t sdc_tsec_unpack(uint32_t v, uint64_t anchor)
+{
+    if (!v || v > SDC_TSEC_MASK || anchor <= SDC_T_EPOCH) return 0;
+    const uint32_t a = (uint32_t)((anchor - SDC_T_EPOCH) & SDC_TSEC_MASK);
+    const uint32_t d = (a - v) & SDC_TSEC_MASK;           /* how long before the anchor, modulo 2^24 s */
+    if (d > SDC_TSEC_MASK + 1u - SDC_TSEC_AHEAD) return anchor + (SDC_TSEC_MASK + 1u - d);   /* a little ahead of it: a clock that ran fast */
+    return anchor > d ? anchor - d : 0;
+}

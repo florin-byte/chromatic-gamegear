@@ -85,6 +85,11 @@ static void do_op(int op)
     case kSdOp_Refresh:
         if (Sd_Mount() == 0) (void)SdLib_Refresh(0);
         break;
+    case kSdOp_Look: {                               /* 1.1.6: the card still there (CMD13); a card mounted now: its games */
+        const uint32_t g = Sd_Generation();
+        if (Sd_Mount() == 0 && Sd_Generation() != g) (void)SdLib_Refresh(0);
+        break;
+    }
     case kSdOp_Format: case kSdOp_FormatExfat: {
         _T.pct = 0;
         const int r = Sd_Format(op == kSdOp_FormatExfat, pct);
@@ -332,13 +337,13 @@ static int cmd_sd(int argc, char **argv)
     if (!strcmp(c, "job") && argc >= 3) {
         /* lane ui110dev: SYSTEM > GAMES's jobs from the console: sd job backup | card2lib PATH | cart2lib | lib2card UID |
            card2cart PATH [backup] | lib2cart UID [backup] */
-        static const char *const kN[] = { "", "backup", "card2cart", "lib2cart", "card2lib", "cart2lib", "lib2card" };
+        static const char *const kN[] = { "", "backup", "card2cart", "lib2cart", "card2lib", "cart2lib", "lib2card", "save2cloud" };
         int k = 0;
         for (int i = 1; i < (int)(sizeof kN / sizeof kN[0]); i++) if (!strcmp(argv[2], kN[i])) k = i;
-        if (!k) { printf("sd: job: backup | card2lib PATH | cart2lib | lib2card UID | card2cart PATH [backup] | lib2cart UID [backup]\n"); return 1; }
+        if (!k) { printf("sd: job: backup | card2lib PATH | cart2lib | lib2card UID | save2cloud UID | card2cart PATH [backup] | lib2cart UID [backup]\n"); return 1; }
         const char *a = argc >= 4 ? argv[3] : NULL;
         const int bf = argc >= 5 && !strcmp(argv[4], "backup") ? kSdJf_BackupFirst : 0;
-        const int byuid = k == kSdJob_LibToCard || k == kSdJob_LibToCart;
+        const int byuid = k == kSdJob_LibToCard || k == kSdJob_LibToCart || k == kSdJob_SaveToCloud;
         const int64_t t0 = esp_timer_get_time();
         int r = Sd_AskJob(k, byuid ? NULL : a, byuid && a ? num(a) : 0, bf, "");
         if (!r) r = wait_op();

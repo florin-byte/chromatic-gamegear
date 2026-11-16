@@ -1,3 +1,54 @@
+## v1.1.12
+
+1.1.11 plus a CUSTOM page for custom firmware. **Goes with FPGA 18.33** (no FPGA change). Boot loader and partition table unchanged.
+
+- SYSTEM has a CUSTOM item next to UPDATE, for firmware made at shinyrelay.com/custom-firmware. Not linked: A links this Chromatic (it shows a code to type on the website; the same pairing as ONLINE). Linked: it shows this Chromatic's ID, A checks for the build you sent, shows its name and version, and asks before it downloads and before it installs. On a custom build, B goes back to the official Shiny Relay.
+- UPDATE is for official releases only. It never downloads or installs a custom build, and on a custom build it offers the official release.
+- SYSTEM INFO shows the whole version. On the MCU / FPGA view the version has a row of its own under MCU:, so a custom build's version (for example v1.1.12-cfw.8104) is no longer cut off.
+- SYSTEM INFO shows the FPGA version alone (FPGA: v18.33). It used to add "(dbg)", a mark every Shiny Relay FPGA carries because it is not ModRetro's own build; it said nothing a person needs.
+
+## v1.1.11
+
+1.1.10 plus warm whites for Game Boy games and game clocks that keep real time. **Goes with FPGA 18.33.**
+
+- The warmth setting (Neutral, Warm 1 to 5) also warms Game Boy games. The COLOR TEMP page is there in Game Boy mode too.
+- A game with a clock (Gold, Silver, Crystal) played from the Chromatic or its card keeps its in-game time across power-offs. The unit gets the real time over Wi-Fi and catches the clock up when the game loads, and never moves a clock back.
+- SYSTEM > CLOCK sets the date and time by hand when Wi-Fi has not given it.
+- SAVE TO MY GAMES now shows on a Chromatic that is not paired or has no Wi-Fi saved, and pressing it says what to do first.
+- SAVE TO MY GAMES leaves more memory for its secure connection, so NOT ENOUGH MEMORY comes up less often.
+
+## v1.1.10
+
+1.1.9 plus SAVE TO MY GAMES. **Goes with FPGA 18.32** (no FPGA change).
+
+- A game kept ON CHROMATIC gets a SAVE TO MY GAMES row: its newest save goes up to the paired account's My Games, where it can be downloaded. Nothing playing, Wi-Fi saved, paired.
+- A clock game's save carries its clock, the same 48 bytes a card copy has.
+- The same save sent again is not stored twice; a game holding 8 saves refuses and deletes nothing.
+
+## v1.1.9
+
+1.1.8 plus updates that stay. **Goes with FPGA 18.32** (no FPGA change).
+
+- A new version confirms itself about 2 seconds after it starts with the FPGA link up (it was 20 seconds), and the unit no longer naps until it has. Before, switching off too soon after an update quietly put the old version back.
+
+## v1.1.8
+
+1.1.7 plus faster saves. **Goes with FPGA 18.32** (no FPGA change).
+
+- A game that writes only when it saves reaches flash about 1.5 seconds after the save, measured on Pokemon Crystal. On 1.1.7 it waited for 1.5 seconds of quiet first and the write was slower.
+- The flash write is faster: one link reset per save instead of one per 2 KiB, and the next save's area is erased ahead of time.
+- A game that writes its save memory all the time still reaches flash every 10 seconds or so, so that the flash does not wear out.
+- The unit no longer naps in the middle of a save copy.
+- The log gives how long each save took to reach flash.
+
+## v1.1.7
+
+1.1.6 plus a fix for lost saves. **Goes with FPGA 18.32** (no FPGA change).
+
+- A game playing from the unit's flash or card, with Wi-Fi quiet, could leave the unit asleep for minutes. While it slept nothing checked whether the game had saved, so a save stayed only in the unit's memory and was lost when the unit was switched off from inside the game. The unit now wakes about once a second while a game plays, checks for a new save, and copies it.
+- The unit no longer goes to sleep between seeing a save and finishing its copy.
+- `pwr` shows a new count, `wake_timer`, for these wake-ups.
+
 ## v1.1.0
 
 1.0.9 plus Shiny Relay's own update over Wi-Fi (owner 2026-10-20). **Goes with FPGA 18.28.**
