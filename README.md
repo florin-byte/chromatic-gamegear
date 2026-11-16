@@ -14,6 +14,17 @@ part comes from and under which licence, `CHANGES.md` says what I changed.
 
 No games are included. You need your own ROM files.
 
+## How it looks
+
+My console: the Game Gear folders on the card, the games in one of them, and Sonic the Hedgehog running.
+
+<p>
+<img src="docs/img/photo-folders.jpg" width="190" alt="The Game Gear folders in the game list">
+<img src="docs/img/photo-games.jpg" width="190" alt="The games of one folder">
+<img src="docs/img/photo-sonic-title.jpg" width="190" alt="Sonic the Hedgehog, title screen">
+<img src="docs/img/photo-sonic-play.jpg" width="190" alt="Sonic the Hedgehog, first level">
+</p>
+
 ## What you see on the console
 
 GAMES has a tab of its own in the menu, and SELECT opens the game list from anywhere in the menu. The list
@@ -26,6 +37,15 @@ a few seconds, until the firmware knows which core the FPGA started.
 
 SYSTEM has a new entry, CORE. It shows the core that is running, how many switches are left, and A switches
 to the other core. The switch happens the next time you turn the console off and on.
+
+<p>
+<img src="docs/img/menu-games-tab.png" width="250" alt="The GAMES tab">
+<img src="docs/img/menu-core.png" width="250" alt="SYSTEM > CORE">
+<img src="docs/img/menu-core-switch.png" width="250" alt="The question before a switch">
+</p>
+
+These three are not photos. They are drawn on a PC by the same code that draws the pages on the console
+(`firmware/shiny-relay-mcu/components/osd/system/host`).
 
 Game Boy cartridges work only with the Game Boy core. If the console is on the Game Gear core and you want
 to play a cartridge, switch to the Game Boy core first.

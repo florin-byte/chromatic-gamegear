@@ -437,6 +437,14 @@ static void core_press(Button_t b)
     Core_OnButton(b, kButtonState_Pressed, NULL);
     Core_Draw(&screen);
 }
+/* the CORE page as a picture (shot() would draw the GAMES page over it) */
+static void core_shot(const char *name)
+{
+    printf("%s|NETWORK,GAMES,*CORE,GET  GAMES,DOWNLOAD", name);
+    char b[128];
+    for (int r = 0; r < 7; r++) { row(r, b, sizeof b); printf("|%s", b); }
+    printf("\n");
+}
 static void t_core_page(void)
 {
     Games_OnTransition(NULL);
@@ -447,15 +455,18 @@ static void t_core_page(void)
     CHECK(!has("SWITCHES  LEFT"), "unknown switch count is hidden");
     switches_left = 957; Core_Draw(&screen);
     CHECK(has("SWITCHES  LEFT:  957"), "CORE shows remaining switches");
+    core_shot("C01_core");
     switches_left = 0; Core_Draw(&screen);
     CHECK(has("SWITCHES  LEFT:  0"), "CORE shows exhausted switches");
     switches_left = -1;
     core_press(kButton_A);
     CHECK(has("THE  GAME  GEAR  CORE"), "CORE confirms the next core");
+    core_shot("C02_core_confirm");
     core_press(kButton_B);
     CHECK(Games_BenchView() == 0 && !switch_calls, "CORE cancel performs no write");
     core_press(kButton_A); core_press(kButton_A);
     CHECK(switch_calls == 1 && switch_slot == 1 && has("GAME  GEAR  NEXT") && has("TURN  OFF  AND  ON"), "CORE shares switch worker and result");
+    core_shot("C03_core_next");
     core_press(kButton_A);
     next_slot = 1; Core_Draw(&screen);
     CHECK(has("GAME  BOY") && has("GAME  GEAR  NEXT"), "CORE retains running and pending core separately");
