@@ -22,7 +22,7 @@ My console: the Game Gear folders on the card, the games in one of them, and Son
 <img src="docs/img/photo-folders.jpg" width="155" alt="The Game Gear folders in the game list">
 <img src="docs/img/photo-games.jpg" width="155" alt="The games of one folder">
 <img src="docs/img/photo-sega.jpg" width="155" alt="The SEGA logo when Sonic the Hedgehog starts">
-<img src="docs/img/photo-sonic-title.jpg" width="190" alt="Sonic the Hedgehog, title screen">
+<img src="docs/img/photo-sonic-title.jpg" width="155" alt="Sonic the Hedgehog, title screen">
 <img src="docs/img/photo-sonic-play.jpg" width="155" alt="Sonic the Hedgehog, first level">
 </p>
 
