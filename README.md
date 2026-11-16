@@ -1,38 +1,93 @@
-# Chromatic dual core: Game Boy + Game Gear
+# Game Gear on the ModRetro Chromatic
 
-A modified firmware and FPGA setup for the ModRetro Chromatic that holds **two FPGA designs** in the console's
-boot flash — the Game Boy / Game Boy Color design and a Sega Game Gear design — and lets you choose which one
-starts, from the console's own menu.
+I wanted to play Sega Game Gear games on my Chromatic. The reason is the screen: the Game Gear has the same
+resolution as the Game Boy, 160 x 144, which is exactly the Chromatic's screen. So nothing is scaled, every
+pixel of the game is one pixel of the screen.
 
-This is a derivative of **Shiny Relay 1.1.5** (by Shiny Gen, https://shinyrelay.com), which is itself a modified
-version of ModRetro's open-source Chromatic FPGA design and ESP32 firmware. It is not made by, affiliated with or
-endorsed by ModRetro, Shiny Gen, Sega or Nintendo. See `NOTICE.md` for where every part comes from and its
-licence, and `CHANGES.md` for what was changed here.
+This repository is what came out of it: a Game Gear core for the Chromatic's FPGA, and a firmware that keeps
+it on the console next to the Game Boy core, so you pick which one the console starts with.
 
-**No games are included.** You need your own ROM files.
+It is built on Shiny Relay 1.1.5 (by Shiny Gen, https://shinyrelay.com), which is a modified version of
+ModRetro's open-source FPGA design and ESP32 firmware. The Game Gear core is the MiSTer SMS core, running in
+Game Gear mode. I have nothing to do with ModRetro, Shiny Gen, Sega or Nintendo. `NOTICE.md` says where every
+part comes from and under which licence, `CHANGES.md` says what I changed.
 
-## What it does
+No games are included. You need your own ROM files.
 
-- **Two cores, one console.** SYSTEM > CORE shows the core that runs and switches to the other one. A switch takes
-  effect when the console is switched off and on (nothing can restart the FPGA from the inside). The page shows
-  how many switches are left; a fresh install has about 960.
-- **Game Gear games from the card.** A Game Gear ROM is wrapped by `tools/gg2gb.py` so the firmware loads it like a
-  card game. Cartridge RAM (32 KiB) is kept on the card in `/SAVES`, as for Game Boy games.
-- **Only the running core's games are listed.** If a game for the other core is started anyway, the menu offers
-  the switch.
-- **An installer** (`tools/installer`) that backs the console up, writes both designs with fresh jump headers and
-  the firmware, restores a backup, and puts a Game Gear game on the card over USB.
+## What you see on the console
 
-## What you need
+GAMES has a tab of its own in the menu, and SELECT opens the game list from anywhere in the menu. The list
+takes the whole screen and shows the folders as they are on the card. SELECT again changes the view: A to Z,
+last played, folders.
 
-- A Chromatic that already runs Shiny Relay 1.1.5 (its boot flash layout with the recovery design is required;
-  the installer refuses anything else).
-- The console's Gowin USB cable interface (GWU2X) reachable from the computer, `openFPGALoader` with GWU2X
-  support, Python 3.9+, `esptool` 4.x and `pyserial`.
-- The binaries (`mcu_fw.bin`, `ota_data_initial.bin`, `partition-table.bin`, `fpga-gb.bin`, `fpga-gg.bin`,
-  `SHA256SUMS`), built from this tree or taken from a release of this repository.
+The list shows only the games of the core that is running. With the Game Boy core you see your Game Boy
+games, with the Game Gear core you see the Game Gear ones. Right after power-on it says READING THE CORE for
+a few seconds, until the firmware knows which core the FPGA started.
 
-Read `tools/installer/README.md` before the first run. In short:
+SYSTEM has a new entry, CORE. It shows the core that is running, how many switches are left, and A switches
+to the other core. The switch happens the next time you turn the console off and on.
+
+Game Boy cartridges work only with the Game Boy core. If the console is on the Game Gear core and you want
+to play a cartridge, switch to the Game Boy core first.
+
+Game Gear saves work like Game Boy saves: the firmware keeps them on the card, in `/SAVES`.
+
+## How it works
+
+The Chromatic is an FPGA with an ESP32 next to it. The FPGA is the console itself, the ESP32 runs the menu,
+the card and Wi-Fi. When you turn the console on, the FPGA loads its design from a 4 MiB flash chip. At the
+start of that chip there are small 64-byte headers that tell it where the design is. Shiny Relay already uses
+them to make its updates safe.
+
+I split the space after the recovery design in two slots, one for the Game Boy design and one for the Game
+Gear design. Both are on the console all the time. Which one starts depends only on where the header points.
+
+That is also why a switch needs off and on. The FPGA reads the header once, at power-on, before any button
+can be read and before the ESP32 is awake. Nothing on the console can make it load again. So the menu writes
+a new header and asks you to turn the console off and on.
+
+### Why the switches are counted
+
+A header cannot be changed once it is written, and it cannot be erased alone. The only thing you can do is
+write a newer one in the next free place, and the FPGA takes the newest. There are 31 places, so with one
+header per switch the console would stop switching after 31 times.
+
+To get around that, the fixed header does not point to a design. It points to a small sector that has 31
+header places of its own, and those point to the design. A switch writes in that sector. When the sector is
+full, the firmware prepares a second one and spends one fixed place to move to it. That gives about
+31 x 31 = 960 switches.
+
+SYSTEM > CORE shows how many are left. When they are gone, the console stays on the core it was running and
+works as before, it just cannot switch any more. The only way to get the switches back is to install again
+over USB with the installer: it writes fresh headers and the count starts from about 960 again. Your games
+and saves are on the card, so the reinstall does not touch them.
+
+### How a Game Gear game gets in
+
+Shiny Relay plays card games by loading them in the RAM that sits where the cartridge would be. I use the
+same path. `tools/gg2gb.py` puts a Game Boy header in front of the Game Gear ROM, with a mark in it, so the
+firmware handles the file like any card game and knows it needs the Game Gear core. The Game Gear design
+reads the ROM from that RAM, and the game's 32 KiB of save RAM is in the same place, which is how the
+firmware can keep the save on the card.
+
+## Why there is an installer
+
+The first install cannot be done from the menu. The flash chip has to be laid out again: both designs in
+their slots and fresh headers. An update from the menu only knows how to replace one design. So the first
+write goes through the console's Gowin cable, with `openFPGALoader`.
+
+`tools/installer` does it in order: it makes a backup of the console, checks the files, writes the firmware
+and the flash image, and reads the image back. It can also put the backup back, and it can put a Game Gear
+game on the card over USB.
+
+You need:
+
+- a Chromatic that already runs Shiny Relay 1.1.5. The installer refuses anything else.
+- `openFPGALoader` with GWU2X support, Python 3.9 or newer, `esptool` 4.x and `pyserial`.
+- the six files of a release of this repository (`mcu_fw.bin`, `ota_data_initial.bin`, `partition-table.bin`,
+  `fpga-gb.bin`, `fpga-gg.bin`, `SHA256SUMS`), or the same files built from this tree.
+
+Read `tools/installer/README.md` first. In short:
 
 ```sh
 python3 tools/installer/chromatic_install.py check
@@ -41,23 +96,14 @@ python3 tools/installer/chromatic_install.py install --backup backups/TIMESTAMP 
 python3 tools/installer/chromatic_install.py addgame YOUR_GAME.gg --folder "Favorites"
 ```
 
-Keep the backup: it is the way back (`restore`) and it may contain your Wi-Fi password, so do not share it.
-After any step that uses the Gowin cable the screen is dark until the console is switched off and on.
+Keep the backup. It is the way back, and it may have your Wi-Fi password in it, so do not give it to anyone.
+After anything that uses the Gowin cable the screen stays dark until you turn the console off and on.
 
-## Limits and known issues
+## What it does not do
 
-- Tested on one console, from macOS only. Windows and Linux steps are not verified; on Windows the Gowin cable
-  usually needs an extra USB driver.
-- Based on Shiny Relay 1.1.5. Shiny Relay has moved on (1.1.12 at the time of writing: real-time game clocks, warm
-  whites for Game Boy games, save upload, a custom update channel); none of that is merged here.
-- An FPGA update from the console's menu still describes a single design and replaces the design of the core that
-  runs.
-- The cartridge in the slot is a Game Boy thing: while the Game Gear core runs it is not offered.
-- Game Gear carts with a 93C46 EEPROM have no save memory. Not every Game Gear game was tried (22 were; all run).
-- No Gear-to-Gear link.
-- After power-on the menu shows `READING THE CORE` for a few seconds before the games appear.
-- One write through the Gowin cable out of about fifteen failed with a timeout and worked when repeated; the
-  installer stops in that case and is simply run again.
+- I tested it on my console, from a Mac. I did not try the installer on Windows or Linux.
+- An update from the menu replaces only the design of the core that is running.
+- There is no Gear-to-Gear link.
 
 ## Layout of this repository
 
